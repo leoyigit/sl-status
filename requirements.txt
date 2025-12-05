@@ -1,0 +1,8 @@
+slack_bolt
+slack_sdk
+flask
+requests
+openai>=1.12.0
+fpdf
+apscheduler
+python-dateutil
