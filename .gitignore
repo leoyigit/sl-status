@@ -1,41 +1,10 @@
-# Environment variables (NEVER commit these!)
-.env
-.env.local
-.env.*.local
+# 1. Ignore everything by default
+*
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-*.egg-info/
-dist/
-build/
-.venv/
-venv/
-ENV/
+# 2. But keep these specific files (The "Allow List")
+!slprojects.py
+!requirements.txt
+!.gitignore
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
-logs/
-
-# Temporary files
-*.tmp
-/tmp/
-*.pdf
-
-# Config (if contains secrets - you're using env vars, so this is optional)
-# config.json  # Uncomment if you don't want to commit config.json
-
+# (Optional: If you have a Procfile for Render, uncomment the next line)
+# !Procfile
