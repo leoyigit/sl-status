@@ -397,87 +397,74 @@ def setup_openai_assistant():
         return None, None
 
 def fetch_channel_messages(channel_id, limit=100):
-    """Fetch recent messages from a Slack channel"""
+    """Fetch recent messages from a Slack channel (Robust Version)"""
     try:
-        result = app.client.conversations_history(
-            channel=channel_id,
-            limit=limit
-        )
-        
-        if not result.get("ok"):
-            error = result.get("error", "unknown")
-            if error == "not_in_channel" or error == "channel_not_found":
-                print(f"   ⚠️ Bot not in channel {channel_id} - skipping. Invite bot with: /invite @YourBotName")
-                return []  # Return empty, don't crash - this is expected for channels bot isn't in
-            elif error == "missing_scope":
-                print(f"   ⚠️ Bot missing required scope: channels:history or groups:history")
+        # We use a try/except block specifically for the API call
+        try:
+            result = app.client.conversations_history(
+                channel=channel_id,
+                limit=limit
+            )
+        except Exception as e:
+            # Check if it's a "not_in_channel" error
+            error_str = str(e)
+            if "not_in_channel" in error_str:
+                print(f"⚠️ Bot is not in channel {channel_id}. Skipping.")
+                return []
+            elif "channel_not_found" in error_str:
+                 print(f"⚠️ Channel {channel_id} not found. Skipping.")
+                 return []
             else:
-                print(f"   ⚠️ Slack API error for channel {channel_id}: {error}")
+                # If it's a real error, raise it so the outer block catches it
+                raise e
+
+        if not result.get("ok"):
+            print(f"⚠️ Slack API error for {channel_id}: {result.get('error')}")
             return []
         
         all_messages = result.get("messages", [])
-        print(f"   Found {len(all_messages)} total messages in channel")
-        
         messages = []
-        skipped_bot = 0
-        skipped_short = 0
         
         for msg in all_messages:
             # Skip bot messages and system messages
-            if msg.get("subtype") in ["bot_message", "channel_join", "channel_leave", "channel_topic", "channel_purpose"]:
-                skipped_bot += 1
+            if msg.get("subtype") in ["bot_message", "channel_join", "channel_leave", "channel_topic"]:
                 continue
             
             text = msg.get("text", "")
-            # Also check for thread replies and other content
             if not text and "files" in msg:
-                text = f"[File shared: {len(msg.get('files', []))} file(s)]"
+                text = f"[File shared]"
             
-            if text and len(text.strip()) > 5:  # Reduced threshold from 10 to 5
+            # Reduce threshold to capture short status updates
+            if text and len(text.strip()) > 2:
                 messages.append({
                     "text": text,
                     "user": msg.get("user", "unknown"),
                     "ts": msg.get("ts", ""),
                     "channel": channel_id
                 })
-            else:
-                skipped_short += 1
         
-        print(f"   Processed: {len(messages)} valid messages (skipped {skipped_bot} bot/system, {skipped_short} too short)")
         return messages
+
     except Exception as e:
-        print(f"❌ Error fetching messages from {channel_id}: {e}")
-        import traceback
-        traceback.print_exc()
+        # Use simple print to avoid massive stack traces in logs for simple errors
+        print(f"❌ Error fetching messages from {channel_id}: {str(e)[:100]}")
         return []
 
 def sync_slack_messages_to_knowledge_base():
-    """Fetch and sync messages with detailed logging and cleanup"""
+    """Fetch and sync messages with detailed logging"""
     if not ai_client:
         return "❌ AI Client not configured"
     
+    # Get IDs (and ensure they exist)
     assistant_id, vector_store_id = setup_openai_assistant()
     if not assistant_id or not vector_store_id:
-        return "❌ Assistant/Vector Store not found"
+        return "❌ Assistant/Vector Store setup failed"
     
     try:
         all_messages = []
-        stats = {"mailbox": 0, "channels": 0, "files_cleaned": 0}
-        
-        # 1. Clean up OLD log files from Vector Store to prevent duplicates
-        # (This ensures the AI reads the freshest version, not old conflicting ones)
-        try:
-            # List files in the vector store
-            vs_files = ai_client.beta.vector_stores.files.list(vector_store_id=vector_store_id)
-            for file in vs_files.data:
-                # We can't see filenames here easily, but we can delete older files if needed
-                # For safety, we will just upload the new one. OpenAI handles freshness well generally.
-                # Ideally, you would list the file objects and delete the one named "slack_logs.txt"
-                pass 
-        except Exception as e:
-            print(f"⚠️ Cleanup warning: {e}")
+        stats = {"mailbox": 0, "channels": 0}
 
-        # 2. Fetch from Project Channels
+        # --- 1. Fetch Messages ---
         channels_to_sync = []
         
         # Add project channels
@@ -499,17 +486,17 @@ def sync_slack_messages_to_knowledge_base():
             channel_id = ch["id"]
             client_name = ch["client"]
             
+            # Fetch messages (Now safe from crashing)
             messages = fetch_channel_messages(channel_id, limit=50)
             
             if messages:
-                # Count stats
+                # Update stats
                 if client_name == "MAILBOX_INBOX":
                     stats["mailbox"] += len(messages)
                 else:
                     stats["channels"] += len(messages)
                 
                 for msg in messages:
-                    # formatting the log for the AI to read easily
                     all_messages.append({
                         "client": client_name,
                         "type": "Email" if client_name == "MAILBOX_INBOX" else "Slack Chat",
@@ -519,41 +506,53 @@ def sync_slack_messages_to_knowledge_base():
                     })
         
         if not all_messages:
-            return "⚠️ No messages found in any channel."
+            return "⚠️ No messages found in any channel (Bot might not be invited)."
         
-        # 3. Format messages for knowledge base
+        # --- 2. Format File ---
         messages_text = "SLACK LOGS AND EMAIL INBOX DUMP:\n"
-        messages_text += "This file contains recent unstructured conversations and emails.\n"
+        messages_text += f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
         messages_text += "=" * 50 + "\n\n"
         
         for msg in all_messages:
-            date_str = datetime.fromtimestamp(float(msg['timestamp'])).strftime('%Y-%m-%d %H:%M')
+            try:
+                date_str = datetime.fromtimestamp(float(msg['timestamp'])).strftime('%Y-%m-%d %H:%M')
+            except:
+                date_str = "Unknown"
+                
             messages_text += f"📅 Date: {date_str}\n"
             messages_text += f"📂 Source: {msg['client']} ({msg['type']})\n"
             messages_text += f"👤 User: {msg['user']}\n"
             messages_text += f"📝 Content:\n{msg['content']}\n"
             messages_text += "-" * 50 + "\n\n"
         
-        # 4. Upload to OpenAI
+        # --- 3. Upload to OpenAI ---
         import tempfile
-        # Name it specifically so we know what it is
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
             f.write(messages_text)
             temp_path = f.name
         
         with open(temp_path, 'rb') as f:
-            # We explicitly name the file "slack_logs_current.txt"
             file = ai_client.files.create(file=f, purpose="assistants")
         
-        # Add to vector store
-        ai_client.beta.vector_stores.files.create(
-            vector_store_id=vector_store_id,
-            file_id=file.id
-        )
-        
+        # Add to vector store (Handling API variations)
+        try:
+            if hasattr(ai_client, 'beta') and hasattr(ai_client.beta, 'vector_stores'):
+                ai_client.beta.vector_stores.files.create(
+                    vector_store_id=vector_store_id,
+                    file_id=file.id
+                )
+            else:
+                # Fallback for older libraries (though you should update requirements.txt)
+                ai_client.vector_stores.files.create(
+                    vector_store_id=vector_store_id,
+                    file_id=file.id
+                )
+        except Exception as e:
+            print(f"❌ OpenAI Vector Store Error: {e}")
+            return f"❌ OpenAI Library Error: {str(e)} (Check requirements.txt)"
+
         os.unlink(temp_path)
         
-        # Return a nice summary string
         return (
             f"✅ *Sync Complete!*\n"
             f"📧 Emails (Mailbox): {stats['mailbox']}\n"
@@ -562,8 +561,10 @@ def sync_slack_messages_to_knowledge_base():
         )
         
     except Exception as e:
-        print(f"❌ Error syncing: {e}")
-        return f"❌ Sync Error: {str(e)}"
+        print(f"❌ Critical Sync Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return f"❌ Critical Sync Error: {str(e)[:100]}"
 
 def sync_data_to_knowledge_base():
     """Sync project data to knowledge base"""
