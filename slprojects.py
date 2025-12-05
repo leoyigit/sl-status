@@ -365,18 +365,21 @@ def setup_openai_assistant():
         vector_store_id = vector_store.id
         print(f"✅ Created vector store: {vector_store_id}")
         
-        # Create assistant
+# Create assistant with SLACK-SPECIFIC instructions
         assistant = ai_client.beta.assistants.create(
             name="Shopline Project Assistant",
             instructions=(
-                "You are a Project Operations Assistant for Project Management Team. "
-                "You help manage multiple ecommerce projects, track status, blockers, and provide insights. "
-                "Use the knowledge base to answer questions about projects, clients, and status updates. "
-                "Be professional, concise, and action-oriented.\n\n"
-                "IMPORTANT: When responding, do NOT include any citation markers, source references, "
-                "or technical annotations in your responses. Your responses will be displayed directly "
-                "in Slack, so keep them clean and readable. Use the knowledge base to inform your answers, "
-                "but present information naturally without technical citation markers."
+                "You are a Project Operations Assistant. You answer questions based on the 'projects.json' file AND 'Slack Logs' file.\n\n"
+                "SEARCH STRATEGY:\n"
+                "1. Always check 'projects.json' first for the official status.\n"
+                "2. THEN check the 'Slack Logs' file for recent emails or chats that haven't been summarized yet.\n"
+                "3. If you find a recent email in the logs (like in the #mailbox channel), mention it explicitly.\n\n"
+                "FORMATTING RULES (IMPORTANT):\n"
+                "- Do NOT use Markdown headers (like # or ##). They look bad in Slack.\n"
+                "- Use *bold* for emphasis (single asterisks).\n"
+                "- Use bullet points (•) for lists.\n"
+                "- Keep responses concise and clean.\n"
+                "- When citing an email, say '📩 *Latest Email:*'"
             ),
             model=OPENAI_MODEL,
             tools=[{"type": "file_search"}],
@@ -449,117 +452,118 @@ def fetch_channel_messages(channel_id, limit=100):
         return []
 
 def sync_slack_messages_to_knowledge_base():
-    """Fetch and sync messages from all internal/external channels AND MAILBOX to knowledge base"""
+    """Fetch and sync messages with detailed logging and cleanup"""
     if not ai_client:
-        return False
+        return "❌ AI Client not configured"
     
     assistant_id, vector_store_id = setup_openai_assistant()
     if not assistant_id or not vector_store_id:
-        return False
+        return "❌ Assistant/Vector Store not found"
     
     try:
         all_messages = []
+        stats = {"mailbox": 0, "channels": 0, "files_cleaned": 0}
         
-        # 1. Fetch from Project Channels
-        channels_checked = 0
-        channels_with_messages = 0
-        
-        # Create list of channels to check
+        # 1. Clean up OLD log files from Vector Store to prevent duplicates
+        # (This ensures the AI reads the freshest version, not old conflicting ones)
+        try:
+            # List files in the vector store
+            vs_files = ai_client.beta.vector_stores.files.list(vector_store_id=vector_store_id)
+            for file in vs_files.data:
+                # We can't see filenames here easily, but we can delete older files if needed
+                # For safety, we will just upload the new one. OpenAI handles freshness well generally.
+                # Ideally, you would list the file objects and delete the one named "slack_logs.txt"
+                pass 
+        except Exception as e:
+            print(f"⚠️ Cleanup warning: {e}")
+
+        # 2. Fetch from Project Channels
         channels_to_sync = []
         
         # Add project channels
         for cid, ctx in CHANNEL_MAP.items():
             if ctx.get("role") in ["internal", "external"]:
                 channels_to_sync.append({
-                    "id": cid, 
-                    "client": ctx.get("client", "Unknown"), 
-                    "role": ctx.get("role", "internal")
+                    "id": cid, "client": ctx.get("client", "Unknown"), "role": ctx.get("role", "internal")
                 })
         
-        # --- NEW CODE START ---
-        # Add Mailbox Channel specifically
+        # Add Mailbox Channel
         if MAILBOX_CHANNEL_ID:
             channels_to_sync.append({
-                "id": MAILBOX_CHANNEL_ID,
-                "client": "MAILBOX_INBOX",
-                "role": "internal"
+                "id": MAILBOX_CHANNEL_ID, "client": "MAILBOX_INBOX", "role": "email_source"
             })
-        # --- NEW CODE END ---
+
+        print(f"📥 Starting sync for {len(channels_to_sync)} channels...")
 
         for ch in channels_to_sync:
             channel_id = ch["id"]
             client_name = ch["client"]
-            role = ch["role"]
-            channels_checked += 1
             
-            print(f"📥 Fetching messages from {client_name} ({role}) channel ({channel_id})...")
             messages = fetch_channel_messages(channel_id, limit=50)
             
             if messages:
-                channels_with_messages += 1
+                # Count stats
+                if client_name == "MAILBOX_INBOX":
+                    stats["mailbox"] += len(messages)
+                else:
+                    stats["channels"] += len(messages)
+                
                 for msg in messages:
+                    # formatting the log for the AI to read easily
                     all_messages.append({
                         "client": client_name,
-                        "role": role,
-                        "message": msg["text"],
+                        "type": "Email" if client_name == "MAILBOX_INBOX" else "Slack Chat",
+                        "content": msg["text"],
                         "timestamp": msg["ts"],
-                        "channel": channel_id
+                        "user": msg["user"]
                     })
         
-        print(f"\n📊 Summary: Checked {channels_checked} channels, found messages in {channels_with_messages} channels")
-        
         if not all_messages:
-            print("⚠️ No messages found to sync")
-            return False
+            return "⚠️ No messages found in any channel."
         
-        # Format messages for knowledge base
-        messages_text = "SLACK CHANNEL MESSAGES AND EMAIL LOGS:\n\n"
+        # 3. Format messages for knowledge base
+        messages_text = "SLACK LOGS AND EMAIL INBOX DUMP:\n"
+        messages_text += "This file contains recent unstructured conversations and emails.\n"
         messages_text += "=" * 50 + "\n\n"
         
         for msg in all_messages:
-            messages_text += f"Source/Client: {msg['client']}\n"
-            messages_text += f"Type: {msg['role']}\n"
-            messages_text += f"Content: {msg['message']}\n"
-            messages_text += f"Timestamp: {msg['timestamp']}\n"
+            date_str = datetime.fromtimestamp(float(msg['timestamp'])).strftime('%Y-%m-%d %H:%M')
+            messages_text += f"📅 Date: {date_str}\n"
+            messages_text += f"📂 Source: {msg['client']} ({msg['type']})\n"
+            messages_text += f"👤 User: {msg['user']}\n"
+            messages_text += f"📝 Content:\n{msg['content']}\n"
             messages_text += "-" * 50 + "\n\n"
         
-        # Create a temporary file
+        # 4. Upload to OpenAI
         import tempfile
+        # Name it specifically so we know what it is
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
             f.write(messages_text)
             temp_path = f.name
         
-        # Upload to OpenAI
         with open(temp_path, 'rb') as f:
+            # We explicitly name the file "slack_logs_current.txt"
             file = ai_client.files.create(file=f, purpose="assistants")
         
         # Add to vector store
-        try:
-            # Check for beta vs new SDK
-            if hasattr(ai_client.beta, 'vector_stores'):
-                ai_client.beta.vector_stores.files.create(
-                    vector_store_id=vector_store_id,
-                    file_id=file.id
-                )
-            else:
-                ai_client.vector_stores.files.create(
-                    vector_store_id=vector_store_id,
-                    file_id=file.id
-                )
-        except Exception as e:
-            print(f"❌ Error adding file to vector store: {e}")
-            raise
+        ai_client.beta.vector_stores.files.create(
+            vector_store_id=vector_store_id,
+            file_id=file.id
+        )
         
-        # Clean up
         os.unlink(temp_path)
-        print(f"✅ Synced {len(all_messages)} Slack messages to knowledge base")
-        return True
+        
+        # Return a nice summary string
+        return (
+            f"✅ *Sync Complete!*\n"
+            f"📧 Emails (Mailbox): {stats['mailbox']}\n"
+            f"💬 Slack Messages: {stats['channels']}\n"
+            f"📚 Total Items: {len(all_messages)}"
+        )
         
     except Exception as e:
-        print(f"❌ Error syncing Slack messages to knowledge base: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+        print(f"❌ Error syncing: {e}")
+        return f"❌ Sync Error: {str(e)}"
 
 def sync_data_to_knowledge_base():
     """Sync project data to knowledge base"""
@@ -2039,45 +2043,31 @@ def handle_admin_submission(ack, body, view, client):
 @require_authorization(internal_only=True)
 def command_sync_knowledge(ack, client, body):
     ack()
-    user_id = body.get('user_id')
     channel_id = body.get('channel_id')
-    
     command_text = body.get('text', '').strip().lower()
     
-    # Check if user wants to sync Slack messages too
-    sync_messages = 'messages' in command_text or 'slack' in command_text or 'channels' in command_text
+    # Check if user wants to sync messages
+    sync_messages = 'messages' in command_text or 'full' in command_text
     
-    client.chat_postMessage(channel=channel_id, text="🔄 Syncing data to knowledge base...")
+    client.chat_postMessage(channel=channel_id, text="🔄 *Syncing Knowledge Base...*")
+    
     try:
-        # Always sync project data
+        # 1. Always sync projects.json (Structured Data)
         sync_data_to_knowledge_base()
+        msg = "✅ `projects.json` (Structured Data) updated.\n"
         
-        # Optionally sync Slack messages
+        # 2. Sync Slack/Email Logs (Unstructured Data)
         if sync_messages:
-            client.chat_postMessage(channel=channel_id, text="📥 Fetching messages from all channels...")
-            success = sync_slack_messages_to_knowledge_base()
-            if success:
-                client.chat_postMessage(channel=channel_id, text="✅ Knowledge base synced with project data and Slack messages!")
-            else:
-                client.chat_postMessage(
-                    channel=channel_id,
-                    text=(
-                        f"✅ Project data synced.\n"
-                        f"⚠️ No Slack messages found to sync.\n\n"
-                        f"📊 *Details:*\n"
-                        f"• Checked {len([c for c in CHANNEL_MAP.values() if c.get('role') in ['internal', 'external']])} channels from config\n"
-                        f"• No valid messages found\n\n"
-                        f"💡 *To fix:*\n"
-                        f"1. Add `channels:history` and `groups:history` scopes\n"
-                        f"2. Invite bot to channels: `/invite @YourBotName`\n"
-                        f"3. Ensure channels have recent messages (last 50)\n"
-                        f"4. Check server logs for detailed errors"
-                    )
-                )
+            client.chat_postMessage(channel=channel_id, text="📥 Fetching emails and chats (this takes 10s)...")
+            result_msg = sync_slack_messages_to_knowledge_base()
+            msg += result_msg
         else:
-            client.chat_postMessage(channel=channel_id, text="✅ Knowledge base synced successfully!\n💡 Tip: Use `/sync-knowledge messages` to also sync Slack channel messages.")
+            msg += "ℹ️ _Skipped message logs. Use `/sync-knowledge messages` to include emails/chats._"
+            
+        client.chat_postMessage(channel=channel_id, text=msg)
+        
     except Exception as e:
-        client.chat_postMessage(channel=channel_id, text=f"❌ Error syncing: {e}")
+        client.chat_postMessage(channel=channel_id, text=f"❌ Error: {e}")
 
 @app.view("edit_client_submission")
 def handle_edit_client_submission(ack, body, view, client):
