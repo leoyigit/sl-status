@@ -449,7 +449,7 @@ def fetch_channel_messages(channel_id, limit=100):
         return []
 
 def sync_slack_messages_to_knowledge_base():
-    """Fetch and sync messages from all internal/external channels to knowledge base"""
+    """Fetch and sync messages from all internal/external channels AND MAILBOX to knowledge base"""
     if not ai_client:
         return False
     
@@ -460,53 +460,66 @@ def sync_slack_messages_to_knowledge_base():
     try:
         all_messages = []
         
-        # Fetch messages from all channels in channel_map
+        # 1. Fetch from Project Channels
         channels_checked = 0
         channels_with_messages = 0
         
-        for channel_id, context in CHANNEL_MAP.items():
-            if context.get("role") in ["internal", "external"]:
-                client_name = context.get("client", "Unknown")
-                role = context.get("role", "internal")
-                channels_checked += 1
-                
-                print(f"📥 Fetching messages from {client_name} ({role}) channel ({channel_id})...")
-                messages = fetch_channel_messages(channel_id, limit=50)
-                
-                if messages:
-                    channels_with_messages += 1
-                    for msg in messages:
-                        all_messages.append({
-                            "client": client_name,
-                            "role": role,
-                            "message": msg["text"],
-                            "timestamp": msg["ts"],
-                            "channel": channel_id
-                        })
+        # Create list of channels to check
+        channels_to_sync = []
+        
+        # Add project channels
+        for cid, ctx in CHANNEL_MAP.items():
+            if ctx.get("role") in ["internal", "external"]:
+                channels_to_sync.append({
+                    "id": cid, 
+                    "client": ctx.get("client", "Unknown"), 
+                    "role": ctx.get("role", "internal")
+                })
+        
+        # --- NEW CODE START ---
+        # Add Mailbox Channel specifically
+        if MAILBOX_CHANNEL_ID:
+            channels_to_sync.append({
+                "id": MAILBOX_CHANNEL_ID,
+                "client": "MAILBOX_INBOX",
+                "role": "internal"
+            })
+        # --- NEW CODE END ---
+
+        for ch in channels_to_sync:
+            channel_id = ch["id"]
+            client_name = ch["client"]
+            role = ch["role"]
+            channels_checked += 1
+            
+            print(f"📥 Fetching messages from {client_name} ({role}) channel ({channel_id})...")
+            messages = fetch_channel_messages(channel_id, limit=50)
+            
+            if messages:
+                channels_with_messages += 1
+                for msg in messages:
+                    all_messages.append({
+                        "client": client_name,
+                        "role": role,
+                        "message": msg["text"],
+                        "timestamp": msg["ts"],
+                        "channel": channel_id
+                    })
         
         print(f"\n📊 Summary: Checked {channels_checked} channels, found messages in {channels_with_messages} channels")
         
         if not all_messages:
             print("⚠️ No messages found to sync")
-            print("💡 Possible reasons:")
-            print("   - Bot needs 'channels:history' or 'groups:history' scope")
-            print("   - Bot needs to be added/invited to the channels")
-            print("   - Channels have no recent messages (last 50 messages)")
-            print("   - Messages are too short (< 5 chars) or filtered out")
-            print("   - All messages are from bots/system")
-            print(f"\n📋 Channels checked: {channels_checked}")
-            if channels_checked == 0:
-                print("   ⚠️ No channels found in channel_map with 'internal' or 'external' role")
             return False
         
         # Format messages for knowledge base
-        messages_text = "SLACK CHANNEL MESSAGES AND UPDATES:\n\n"
+        messages_text = "SLACK CHANNEL MESSAGES AND EMAIL LOGS:\n\n"
         messages_text += "=" * 50 + "\n\n"
         
         for msg in all_messages:
-            messages_text += f"Client: {msg['client']}\n"
-            messages_text += f"Channel Type: {msg['role']}\n"
-            messages_text += f"Message: {msg['message']}\n"
+            messages_text += f"Source/Client: {msg['client']}\n"
+            messages_text += f"Type: {msg['role']}\n"
+            messages_text += f"Content: {msg['message']}\n"
             messages_text += f"Timestamp: {msg['timestamp']}\n"
             messages_text += "-" * 50 + "\n\n"
         
@@ -522,13 +535,13 @@ def sync_slack_messages_to_knowledge_base():
         
         # Add to vector store
         try:
+            # Check for beta vs new SDK
             if hasattr(ai_client.beta, 'vector_stores'):
                 ai_client.beta.vector_stores.files.create(
                     vector_store_id=vector_store_id,
                     file_id=file.id
                 )
             else:
-                # Fallback for different SDK versions
                 ai_client.vector_stores.files.create(
                     vector_store_id=vector_store_id,
                     file_id=file.id
@@ -544,6 +557,8 @@ def sync_slack_messages_to_knowledge_base():
         
     except Exception as e:
         print(f"❌ Error syncing Slack messages to knowledge base: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def sync_data_to_knowledge_base():
