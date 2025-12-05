@@ -999,7 +999,7 @@ def handle_mentions(event, say, client):
         process_ai_query(text, channel, say)
 
 def process_email_for_status_update(text, channel_id=None, event_ts=None, user_id=None):
-    """Enhanced email processing that automatically updates project status and tracks email history"""
+    """Enhanced email processing: updates status and logs brief history"""
     if not ai_client:
         return None
     
@@ -1007,14 +1007,15 @@ def process_email_for_status_update(text, channel_id=None, event_ts=None, user_i
         projects = load_db()
         client_names = [p.get("client", "") for p in projects]
         
+        # Enhanced prompt to get better summaries
         prompt = (
             f"Analyze this email/message. "
             f"Available clients: {', '.join(client_names)}\n\n"
             f"Extract:\n"
             f"1. Client name (must match one from the list exactly)\n"
-            f"2. Status update (what's the current status?)\n"
-            f"3. Blockers (if any mentioned)\n"
-            f"4. Summary (brief summary of the update)\n\n"
+            f"2. Status update (current status based on this email)\n"
+            f"3. Blocker (if any mentioned)\n"
+            f"4. Summary (1 concise sentence about this update)\n\n"
             f"Return JSON format:\n"
             f'{{"client": "Client Name", "status": "status text", "blocker": "blocker or empty", "summary": "summary text"}}'
         )
@@ -1041,38 +1042,39 @@ def process_email_for_status_update(text, channel_id=None, event_ts=None, user_i
         
         for p in projects:
             if p.get("client", "").lower() == client_name.lower():
-                # Track email history
+                # 1. Initialize email_history if missing
                 if "email_history" not in p:
                     p["email_history"] = []
                 
-                # Store email entry
+                # 2. Create the new entry
                 email_entry = {
                     "timestamp": email_timestamp,
-                    "summary": result.get("summary", ""),
+                    "summary": result.get("summary", "Update received"),
                     "status_extracted": result.get("status", ""),
-                    "blocker_extracted": result.get("blocker", ""),
-                    "raw_text_preview": text[:200] + "..." if len(text) > 200 else text,
+                    "raw_text_preview": text[:150] + "..." if len(text) > 150 else text, # Limit preview text
                     "slack_ts": event_ts
                 }
+                
+                # 3. Append and strict limit (Keep only last 10 to save space)
                 p["email_history"].append(email_entry)
+                if len(p["email_history"]) > 10:
+                    p["email_history"] = p["email_history"][-10:]
                 
-                # Keep only last 50 email entries to prevent data bloat
-                if len(p["email_history"]) > 50:
-                    p["email_history"] = p["email_history"][-50:]
-                
-                # Update project fields
+                # 4. Update Main Status Fields
                 if result.get("status"):
                     p["status"] = result.get("status")
                 if result.get("blocker"):
                     p["blocker"] = result.get("blocker")
+                    
                 p["last_updated"] = email_timestamp
                 p["last_email_received"] = email_timestamp
+                p["comm_channel"] = "Email" # Auto-mark channel as Email
                 updated = True
                 break
         
         if updated:
             save_db(projects)
-            # Sync to knowledge base
+            # Sync to knowledge base so AI memory is up to date
             sync_data_to_knowledge_base()
             return result
         else:
