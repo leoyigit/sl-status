@@ -1470,6 +1470,20 @@ def process_ask_background(respond, query_text, channel_id, user_id, client):
             response_type="ephemeral"
         )
         
+        # 1. Try to get answer from the Knowledge Base (Assistant) FIRST
+        # This checks the Vector Store (Slack messages, history, etc.)
+        # We give it a 25s timeout so it doesn't hang forever
+        assistant_response = query_assistant(query_text, channel_id, timeout=25)
+        
+        if assistant_response:
+            # If the Assistant found something (e.g. Slack logs), return it!
+            respond(text=assistant_response, response_type="ephemeral")
+            return
+
+        # =================================================================
+        # FALLBACK: If Assistant fails or is empty, use the "Simple" JSON Chat
+        # =================================================================
+        
         # Load Data
         projects = load_db()
         context = get_request_context(channel_id)
@@ -1512,14 +1526,14 @@ def process_ask_background(respond, query_text, channel_id, user_id, client):
             respond(text="⚠️ AI Client not configured.", response_type="ephemeral")
             return
 
-        # AI Call
+        # AI Call (The "Dumb" Fallback)
         response = ai_client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": f"{system_prompt}\n\nPROJECT DATA:\n{data_context}"},
                 {"role": "user", "content": query_text}
             ],
-            timeout=20  # Increased timeout for background thread
+            timeout=20 
         )
         
         # Send Final Answer
