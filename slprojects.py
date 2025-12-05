@@ -340,6 +340,48 @@ def setup_openai_assistant():
             try:
                 assistant = ai_client.beta.assistants.retrieve(ASSISTANT_ID)
                 vector_store_id = assistant.tool_resources.file_search.vector_store_ids[0] if assistant.tool_resources and assistant.tool_resources.file_search else None
+                
+                # Update assistant instructions to ensure email search is enabled
+                # This ensures the assistant always has the latest instructions
+                try:
+                    ai_client.beta.assistants.update(
+                        assistant_id=assistant.id,
+                        instructions=(
+                            "You are a Project Operations Assistant with access to project data and email communications.\n\n"
+                            "DATA SOURCES:\n"
+                            "1. 'projects.json' - Contains structured project status, blockers, and metadata\n"
+                            "2. 'Slack Logs' file - Contains ALL emails from the mailbox channel and Slack chat messages\n\n"
+                            "CRITICAL SEARCH RULES:\n"
+                            "- ALWAYS use file_search tool when user asks about:\n"
+                            "  * Emails, mailbox, email content, email body, communications\n"
+                            "  * Specific client names (e.g., 'Mimosa', 'Avvika') combined with 'email'\n"
+                            "  * 'What did [client] say in their email?'\n"
+                            "  * 'Read the email about [client]'\n"
+                            "  * Any question about email content or messages\n\n"
+                            "EMAIL IDENTIFICATION IN LOGS:\n"
+                            "- Emails are marked with: '📂 Source: MAILBOX_INBOX (Email)'\n"
+                            "- Look for entries where type is 'Email' and client is 'MAILBOX_INBOX'\n"
+                            "- When searching for a specific client's emails, search for the client name in the Content section\n"
+                            "- The full email body/content is in the '📝 EMAIL CONTENT:' or '📝 Content:' section\n\n"
+                            "SEARCH STRATEGY:\n"
+                            "1. If asked about emails, IMMEDIATELY use file_search on 'Slack Logs'\n"
+                            "2. Search for the client name mentioned in the question\n"
+                            "3. Return the FULL email content from the '📝 EMAIL CONTENT:' section\n"
+                            "4. If multiple emails exist, show the most recent ones first\n\n"
+                            "RESPONSE FORMAT:\n"
+                            "- Use Slack-friendly formatting (*bold*, • lists)\n"
+                            "- When showing email content, quote it clearly\n"
+                            "- Include the date/timestamp from the log entry\n"
+                            "- No Markdown headers (#)\n\n"
+                            "EXAMPLE:\n"
+                            "User: 'What did Mimosa say in their email?'\n"
+                            "You: Use file_search → Find entries with 'Mimosa' and 'MAILBOX_INBOX' → Return full email content"
+                        )
+                    )
+                    print("✅ Updated assistant instructions for email search")
+                except Exception as update_error:
+                    print(f"⚠️ Could not update assistant instructions: {update_error}")
+                
                 return assistant.id, vector_store_id
             except Exception:
                 print(f"⚠️ Assistant {ASSISTANT_ID} not found. Creating new one...")
@@ -369,16 +411,35 @@ def setup_openai_assistant():
         assistant = ai_client.beta.assistants.create(
             name="Shopline Project Assistant",
             instructions=(
-                "You are a Project Operations Assistant.\n"
+                "You are a Project Operations Assistant with access to project data and email communications.\n\n"
                 "DATA SOURCES:\n"
-                "1. 'projects.json' (Project Status)\n"
-                "2. 'Slack Logs' file (Contains Emails and Chat Logs)\n\n"
-                "SEARCH RULES:\n"
-                "- If the user asks about 'emails', 'mailbox', or 'communications', you MUST use the file_search tool to look in the 'Slack Logs' file.\n"
-                "- In the logs, emails are labeled as 'Source: MAILBOX_INBOX'.\n"
-                "- If asked to 'read emails', summarize the 3 most recent entries from 'MAILBOX_INBOX'.\n\n"
-                "FORMATTING:\n"
-                "- Use Slack-friendly formatting (*bold*, list •). No Markdown headers (#)."
+                "1. 'projects.json' - Contains structured project status, blockers, and metadata\n"
+                "2. 'Slack Logs' file - Contains ALL emails from the mailbox channel and Slack chat messages\n\n"
+                "CRITICAL SEARCH RULES:\n"
+                "- ALWAYS use file_search tool when user asks about:\n"
+                "  * Emails, mailbox, email content, email body, communications\n"
+                "  * Specific client names (e.g., 'Mimosa', 'Avvika') combined with 'email'\n"
+                "  * 'What did [client] say in their email?'\n"
+                "  * 'Read the email about [client]'\n"
+                "  * Any question about email content or messages\n\n"
+                "EMAIL IDENTIFICATION IN LOGS:\n"
+                "- Emails are marked with: '📂 Source: MAILBOX_INBOX (Email)'\n"
+                "- Look for entries where type is 'Email' and client is 'MAILBOX_INBOX'\n"
+                "- When searching for a specific client's emails, search for the client name in the Content section\n"
+                "- The full email body/content is in the '📝 Content:' section\n\n"
+                "SEARCH STRATEGY:\n"
+                "1. If asked about emails, IMMEDIATELY use file_search on 'Slack Logs'\n"
+                "2. Search for the client name mentioned in the question\n"
+                "3. Return the FULL email content from the '📝 EMAIL CONTENT:' section\n"
+                "4. If multiple emails exist, show the most recent ones first\n\n"
+                "RESPONSE FORMAT:\n"
+                "- Use Slack-friendly formatting (*bold*, • lists)\n"
+                "- When showing email content, quote it clearly\n"
+                "- Include the date/timestamp from the log entry\n"
+                "- No Markdown headers (#)\n\n"
+                "EXAMPLE:\n"
+                "User: 'What did Mimosa say in their email?'\n"
+                "You: Use file_search → Find entries with 'Mimosa' and 'MAILBOX_INBOX' → Return full email content"
             ),
             model=OPENAI_MODEL,
             tools=[{"type": "file_search"}],
@@ -517,11 +578,27 @@ def sync_slack_messages_to_knowledge_base():
                 date_str = datetime.fromtimestamp(float(msg['timestamp'])).strftime('%Y-%m-%d %H:%M')
             except:
                 date_str = "Unknown"
-                
-            messages_text += f"📅 Date: {date_str}\n"
-            messages_text += f"📂 Source: {msg['client']} ({msg['type']})\n"
-            messages_text += f"👤 User: {msg['user']}\n"
-            messages_text += f"📝 Content:\n{msg['content']}\n"
+            
+            # Enhanced formatting for better searchability
+            client_name = msg['client']
+            msg_type = msg['type']
+            content = msg['content']
+            
+            # For emails, add client name extraction for better search
+            if msg_type == "Email":
+                # Try to extract client name from email content for indexing
+                messages_text += f"📅 Date: {date_str}\n"
+                messages_text += f"📂 Source: {client_name} ({msg_type})\n"
+                messages_text += f"📧 EMAIL MESSAGE - Searchable by client name in content\n"
+                messages_text += f"👤 User: {msg['user']}\n"
+                messages_text += f"📝 EMAIL CONTENT:\n{content}\n"
+                messages_text += f"🔍 Keywords: {client_name}, email, mailbox, communication\n"
+            else:
+                messages_text += f"📅 Date: {date_str}\n"
+                messages_text += f"📂 Source: {client_name} ({msg_type})\n"
+                messages_text += f"👤 User: {msg['user']}\n"
+                messages_text += f"📝 Content:\n{content}\n"
+            
             messages_text += "-" * 50 + "\n\n"
         
         # --- 3. Upload to OpenAI ---
@@ -1466,55 +1543,97 @@ def command_project_history_full(ack, respond, command, body):
 # ==========================================
 
 def process_ask_background(respond, query_text, channel_id, user_id, client):
-    """Background worker to handle AI query with LONG timeout"""
+    """Background worker to handle AI query without blocking Slack"""
     try:
         # Show thinking message
         respond(
-            text=f"🧠 *Thinking about: {query_text[:50]}...*",
+            text=f"🧠 *Thinking about: {query_text[:50]}{'...' if len(query_text) > 50 else ''}*",
             response_type="ephemeral"
         )
         
-        # --- FIX 1: INCREASE TIMEOUT ---
-        # Since this is a background thread, we can wait longer (60s).
-        # File search takes time!
-        assistant_response = query_assistant(query_text, channel_id, timeout=60)
+        # ENHANCEMENT: If query mentions email/mailbox, enhance the query to trigger file_search
+        enhanced_query = query_text
+        query_lower = query_text.lower()
+        if any(keyword in query_lower for keyword in ['email', 'mailbox', 'mail', 'message', 'communication', 'said', 'wrote']):
+            # Add explicit instruction to search emails
+            enhanced_query = (
+                f"{query_text}\n\n"
+                f"IMPORTANT: If this question is about emails or communications, "
+                f"you MUST use the file_search tool to search the 'Slack Logs' file. "
+                f"Look for entries marked as 'Source: MAILBOX_INBOX (Email)' and return the full email content."
+            )
+        
+        # 1. Try to get answer from the Knowledge Base (Assistant) FIRST
+        # This checks the Vector Store (Slack messages, history, emails, etc.)
+        # Increased timeout to 60s for file_search operations
+        assistant_response = query_assistant(enhanced_query, channel_id, timeout=60)
         
         if assistant_response:
-            # If the Assistant found it in the Vector Store, return it!
+            # If the Assistant found something (e.g. Slack logs, emails), return it!
             respond(text=assistant_response, response_type="ephemeral")
             return
 
         # =================================================================
-        # FALLBACK LOGIC
+        # FALLBACK: If Assistant fails or is empty, use the "Simple" JSON Chat
         # =================================================================
         
-        # Load Data for fallback
+        # Load Data
         projects = load_db()
-        # ... (keep your existing context/security logic here) ...
-        # (For brevity, I'm assuming you keep the role/context logic from previous code)
         context = get_request_context(channel_id)
         role = context.get('role', 'internal')
-        
-        if role == 'internal':
-             data_context = json.dumps(projects, indent=2)
-             system_prompt = "You are the Project Operations Manager."
+        target_client = context.get('client')
+
+        # Security & Context Setup
+        if role == 'external':
+            if not target_client:
+                respond(text="❌ Error: Client mapping not configured for this channel.", response_type="ephemeral")
+                return
+            projects = [p for p in projects if p.get('client', '').lower() == target_client.lower()]
+            if not projects:
+                respond(text="I can only discuss project details related to this channel.", response_type="ephemeral")
+                return
+            
+            # Sanitize for external
+            safe_projects = []
+            for p in projects:
+                safe_p = {k: v for k, v in p.items() if k not in ['internal_notes', 'budget']}
+                safe_projects.append(safe_p)
+            
+            system_prompt = (
+                f"You are a helpful Project Assistant for {target_client}. "
+                "You are speaking directly to the CLIENT. "
+                "Be professional, polite, and focused on progress. "
+                "Do not mention other clients."
+            )
+            data_context = json.dumps(safe_projects, indent=2)
         else:
-             # ... handle external ...
-             data_context = "..."
-             system_prompt = "..."
+            # Internal
+            system_prompt = (
+                "You are the Project Operations Manager for the internal team. "
+                "You are speaking to developers and PMs. "
+                "Be direct, highlight blockers, and risks."
+            )
+            data_context = json.dumps(projects, indent=2)
 
-        # --- FIX 2: HONEST FALLBACK ---
-        # If we reach here, the Assistant (Knowledge Base) TIMED OUT or failed.
-        # We must tell the prompt that we couldn't access the logs.
-        
-        fallback_prompt = (
-            f"{system_prompt}\n\n"
-            f"IMPORTANT: The user asked about specific logs/emails, but the Knowledge Base search TIMED OUT. "
-            f"You only have access to the 'projects.json' data below. "
-            f"If the answer isn't in the data below, apologize and tell them the log search timed out.\n\n"
-            f"PROJECT DATA:\n{data_context}"
-        )
+        if not ai_client:
+            respond(text="⚠️ AI Client not configured.", response_type="ephemeral")
+            return
 
+        # FALLBACK: If user asked about emails but Assistant didn't find them, be honest
+        if any(keyword in query_lower for keyword in ['email', 'mailbox', 'mail', 'message']):
+            fallback_prompt = (
+                f"{system_prompt}\n\n"
+                f"⚠️ IMPORTANT: The user asked about emails/communications, but the Knowledge Base search "
+                f"did not return results or timed out. You only have access to structured project data below. "
+                f"If the answer isn't in the project data, tell them: 'I couldn't find email content in the "
+                f"knowledge base. Please try running `/sync-knowledge messages` to update the email logs, "
+                f"or check the mailbox channel directly.'\n\n"
+                f"PROJECT DATA:\n{data_context}"
+            )
+        else:
+            fallback_prompt = f"{system_prompt}\n\nPROJECT DATA:\n{data_context}"
+
+        # AI Call (The "Dumb" Fallback)
         response = ai_client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[
@@ -1528,8 +1647,19 @@ def process_ask_background(respond, query_text, channel_id, user_id, client):
         respond(text=response.choices[0].message.content, response_type="ephemeral")
         
     except Exception as e:
-        print(f"❌ Error in background worker: {e}")
-        respond(text=f"❌ Error: {str(e)[:200]}", response_type="ephemeral")
+        error_msg = str(e)
+        print(f"❌ Error in /ask background worker: {error_msg}")
+        
+        if "timeout" in error_msg.lower():
+            respond(
+                text="⏱️ The AI request timed out. Please try a simpler question.",
+                response_type="ephemeral"
+            )
+        else:
+            respond(
+                text=f"❌ Error processing your question: {error_msg[:200]}",
+                response_type="ephemeral"
+            )
 
 @app.command("/ask")
 def command_ask(ack, respond, command, body, client):
