@@ -2,6 +2,7 @@ import json
 import os
 import requests
 import re
+import threading
 from datetime import datetime
 from flask import Flask, request
 from slack_bolt import App
@@ -615,8 +616,17 @@ def clean_citation_markers(text):
     cleaned = re.sub(r' {2,}', ' ', cleaned)
     return cleaned.strip()
 
-def query_assistant(user_query, channel_id=None):
-    """Query OpenAI Assistant with knowledge base"""
+def query_assistant(user_query, channel_id=None, timeout=25):
+    """Query OpenAI Assistant with knowledge base
+    
+    Args:
+        user_query: The user's question
+        channel_id: Optional channel ID for context
+        timeout: Maximum time to wait for response (seconds, default 25)
+    
+    Returns:
+        str: Assistant response or None if timeout/error
+    """
     if not ai_client:
         return None
     
@@ -641,9 +651,17 @@ def query_assistant(user_query, channel_id=None):
             assistant_id=assistant_id
         )
         
-        # Wait for completion
+        # Wait for completion with timeout
         import time
+        start_time = time.time()
+        max_wait_time = timeout
+        
         while run.status in ['queued', 'in_progress', 'cancelling']:
+            elapsed = time.time() - start_time
+            if elapsed > max_wait_time:
+                print(f"⏱️ Assistant query timeout after {max_wait_time} seconds")
+                return None  # Timeout - will fallback to regular chat completion
+            
             time.sleep(1)
             run = ai_client.beta.threads.runs.retrieve(thread_id=thread.id, run_id=run.id)
         
@@ -652,11 +670,19 @@ def query_assistant(user_query, channel_id=None):
             response_text = messages.data[0].content[0].text.value
             # Clean up citation markers
             return clean_citation_markers(response_text)
+        elif run.status == 'failed':
+            error_msg = getattr(run, 'last_error', None)
+            if error_msg:
+                print(f"❌ Assistant run failed: {error_msg}")
+            return None
         else:
-            return f"❌ Assistant run failed: {run.status}"
+            print(f"⚠️ Assistant run status: {run.status}")
+            return None  # Return None to trigger fallback
             
     except Exception as e:
         print(f"❌ Error querying assistant: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 # ==========================================
@@ -896,22 +922,31 @@ def process_ai_query(user_query, channel_id, reply_func):
         reply_func(thinking_msg)
         
         # Try using Assistant first (if configured), fallback to chat completion
-        assistant_response = query_assistant(user_query, channel_id)
+        # Use shorter timeout to avoid Slack command timeout
+        assistant_response = query_assistant(user_query, channel_id, timeout=20)
         if assistant_response:
             reply_func(assistant_response)
             return
         
-        # Fallback to regular chat completion
+        # Fallback to regular chat completion (faster, more reliable)
+        print("📝 Using fallback chat completion (Assistant timeout or not available)")
         response = ai_client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": f"{system_prompt}\n\nPROJECT DATA:\n{data_context}"},
                 {"role": "user", "content": user_query}
-            ]
+            ],
+            timeout=15  # Add timeout to chat completion too
         )
         reply_func(response.choices[0].message.content)
     except Exception as e:
-        reply_func(f"❌ AI Error: {e}")
+        error_msg = str(e)
+        print(f"❌ AI Error: {error_msg}")
+        # Provide user-friendly error message
+        if "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
+            reply_func("⏱️ Request timed out. The AI is taking too long to respond. Please try a simpler question or try again later.")
+        else:
+            reply_func(f"❌ AI Error: {error_msg[:200]}")
 
 # ==========================================
 # FEATURE: MAILBOX & EVENTS
@@ -948,8 +983,8 @@ def handle_mentions(event, say, client):
         # Default to AI
         process_ai_query(text, channel, say)
 
-def process_email_for_status_update(text, channel_id=None):
-    """Enhanced email processing that automatically updates project status"""
+def process_email_for_status_update(text, channel_id=None, event_ts=None, user_id=None):
+    """Enhanced email processing that automatically updates project status and tracks email history"""
     if not ai_client:
         return None
     
@@ -975,7 +1010,8 @@ def process_email_for_status_update(text, channel_id=None):
             messages=[
                 {"role": "system", "content": "You are a project status parser. Always return valid JSON."},
                 {"role": "user", "content": prompt + "\n\nEmail content:\n" + text}
-            ]
+            ],
+            timeout=15
         )
         
         result = json.loads(response.choices[0].message.content)
@@ -986,13 +1022,36 @@ def process_email_for_status_update(text, channel_id=None):
         
         # Find and update project
         updated = False
+        email_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
         for p in projects:
             if p.get("client", "").lower() == client_name.lower():
+                # Track email history
+                if "email_history" not in p:
+                    p["email_history"] = []
+                
+                # Store email entry
+                email_entry = {
+                    "timestamp": email_timestamp,
+                    "summary": result.get("summary", ""),
+                    "status_extracted": result.get("status", ""),
+                    "blocker_extracted": result.get("blocker", ""),
+                    "raw_text_preview": text[:200] + "..." if len(text) > 200 else text,
+                    "slack_ts": event_ts
+                }
+                p["email_history"].append(email_entry)
+                
+                # Keep only last 50 email entries to prevent data bloat
+                if len(p["email_history"]) > 50:
+                    p["email_history"] = p["email_history"][-50:]
+                
+                # Update project fields
                 if result.get("status"):
                     p["status"] = result.get("status")
                 if result.get("blocker"):
                     p["blocker"] = result.get("blocker")
-                p["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                p["last_updated"] = email_timestamp
+                p["last_email_received"] = email_timestamp
                 updated = True
                 break
         
@@ -1007,6 +1066,8 @@ def process_email_for_status_update(text, channel_id=None):
             
     except Exception as e:
         print(f"❌ Error processing email: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 @app.event("message")
@@ -1017,15 +1078,29 @@ def handle_message_events(event, say, client):
     if event.get("subtype") == "bot_message" or event.get("bot_id"):
         return
     
-    # 1. MAILBOX LISTENER - Enhanced with auto-update
+    # 1. MAILBOX LISTENER - Enhanced with auto-update and email tracking
     if channel_id == MAILBOX_CHANNEL_ID:
         text = event.get("text", "")
+        event_ts = event.get("ts", "")
+        user_id = event.get("user", "")
+        
         # If it's a file share (email attachment), text might be empty
         if not text and "attachments" in event:
             text = event["attachments"][0].get("text", "") or event["attachments"][0].get("pretext", "")
+        
+        # Also check for email-specific fields (when forwarded from email)
+        if not text and "files" in event:
+            # Try to get text from file description or title
+            for file_info in event.get("files", []):
+                if file_info.get("title"):
+                    text = file_info.get("title", "")
+                elif file_info.get("preview"):
+                    text = file_info.get("preview", "")
+                break
 
         if text:
-            result = process_email_for_status_update(text, channel_id)
+            print(f"📬 Processing email from mailbox channel: {text[:100]}...")
+            result = process_email_for_status_update(text, channel_id, event_ts, user_id)
             target_channel = CHANNEL_ID_REPORT or MAILBOX_CHANNEL_ID
             if result:
                 client_name = result.get("client", "Unknown")
@@ -1035,12 +1110,17 @@ def handle_message_events(event, say, client):
                         f"📬 *Email Processed & Status Updated*\n"
                         f"*Client:* {client_name}\n"
                         f"*Summary:* {summary}\n"
-                        f"✅ Project status automatically updated!",
+                        f"✅ Project status automatically updated!\n"
+                        f"📧 Email entry logged in project history.",
                         channel=target_channel
                     )
             else:
                 if target_channel:
-                    say(f"📬 *New Mailbox Item* (Manual review needed)", channel=target_channel)
+                    say(
+                        f"📬 *New Mailbox Item* (Manual review needed)\n"
+                        f"Could not automatically identify client or extract status from email.",
+                        channel=target_channel
+                    )
     
     # 2. INGEST SLACK MESSAGES INTO KNOWLEDGE BASE (from internal/external channels)
     # Note: This is handled on schedule to avoid rate limits
@@ -1360,18 +1440,122 @@ def command_project_history_full(ack, respond, command, body):
         history_text += "\n"
     
     respond(text=history_text, response_type="ephemeral")
+# ==========================================
+# FEATURE: ASK COMMAND (THREADED FIX)
+# ==========================================
+
+def process_ask_background(respond, query_text, channel_id, user_id, client):
+    """Background worker to handle AI query without blocking Slack"""
+    try:
+        # Show thinking message
+        respond(
+            text=f"🧠 *Thinking about: {query_text[:50]}{'...' if len(query_text) > 50 else ''}*",
+            response_type="ephemeral"
+        )
+        
+        # Load Data
+        projects = load_db()
+        context = get_request_context(channel_id)
+        role = context.get('role', 'internal')
+        target_client = context.get('client')
+
+        # Security & Context Setup
+        if role == 'external':
+            if not target_client:
+                respond(text="❌ Error: Client mapping not configured for this channel.", response_type="ephemeral")
+                return
+            projects = [p for p in projects if p.get('client', '').lower() == target_client.lower()]
+            if not projects:
+                respond(text="I can only discuss project details related to this channel.", response_type="ephemeral")
+                return
+            
+            # Sanitize for external
+            safe_projects = []
+            for p in projects:
+                safe_p = {k: v for k, v in p.items() if k not in ['internal_notes', 'budget']}
+                safe_projects.append(safe_p)
+            
+            system_prompt = (
+                f"You are a helpful Project Assistant for {target_client}. "
+                "You are speaking directly to the CLIENT. "
+                "Be professional, polite, and focused on progress. "
+                "Do not mention other clients."
+            )
+            data_context = json.dumps(safe_projects, indent=2)
+        else:
+            # Internal
+            system_prompt = (
+                "You are the Project Operations Manager for the internal team. "
+                "You are speaking to developers and PMs. "
+                "Be direct, highlight blockers, and risks."
+            )
+            data_context = json.dumps(projects, indent=2)
+
+        if not ai_client:
+            respond(text="⚠️ AI Client not configured.", response_type="ephemeral")
+            return
+
+        # AI Call
+        response = ai_client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": f"{system_prompt}\n\nPROJECT DATA:\n{data_context}"},
+                {"role": "user", "content": query_text}
+            ],
+            timeout=20  # Increased timeout for background thread
+        )
+        
+        # Send Final Answer
+        respond(text=response.choices[0].message.content, response_type="ephemeral")
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Error in /ask background worker: {error_msg}")
+        
+        if "timeout" in error_msg.lower():
+            respond(
+                text="⏱️ The AI request timed out. Please try a simpler question.",
+                response_type="ephemeral"
+            )
+        else:
+            respond(
+                text=f"❌ Error processing your question: {error_msg[:200]}",
+                response_type="ephemeral"
+            )
 
 @app.command("/ask")
-@require_authorization
-def command_ask(ack, respond, command, body):
+def command_ask(ack, respond, command, body, client):
+    """Handle /ask command - Uses Threading to prevent Timeout"""
+    # 1. Acknowledge Slack immediately (Must happen < 3 seconds)
     ack()
+    
+    user_id = body.get('user_id')
+    channel_id = body.get('channel_id')
     query_text = command.get('text', '').strip()
+
+    # 2. Authorization Check
+    if not is_user_authorized(user_id, client, channel_id):
+        respond(
+            text=(
+                "🚫 *Access Denied*\n\n"
+                "You are not authorized to use this command.\n"
+                "Please contact your administrator."
+            ),
+            response_type="ephemeral"
+        )
+        return
+    
     if not query_text:
         respond(text="Please provide a question. Example: `/ask What projects are stuck?`", response_type="ephemeral")
         return
     
-    channel_id = body.get('channel_id')
-    process_ai_query(query_text, channel_id, lambda text: respond(text=text, response_type="ephemeral"))
+    # 3. Start Background Thread
+    # We pass 'respond' because it contains the response_url which works for 30 minutes
+    worker_thread = threading.Thread(
+        target=process_ask_background,
+        args=(respond, query_text, channel_id, user_id, client)
+    )
+    worker_thread.start()
 
 # ==========================================
 # STANDARD MODAL LOGIC (Add/Edit/Update)
@@ -1428,7 +1612,7 @@ def command_add_client(ack, body, client):
     })
 
 @app.view("add_client_submission")
-def handle_add_submission(ack, view):
+def handle_add_submission(ack, view, body, client):
     ack()
     try:
         name = view["state"]["values"].get("new_client_name", {}).get("input", {}).get("value", "").strip()
@@ -1684,6 +1868,15 @@ def launch_admin_modal(client, trigger_id):
 def command_admin(ack, body, client):
     """Admin command for managing configuration"""
     ack()
+    launch_admin_modal(client, body["trigger_id"])
+
+@app.command("/superadmin")
+@require_authorization(internal_only=True)
+def command_superadmin(ack, body, client):
+    """Superadmin command - same functionality as /admin command (alias)"""
+    ack()
+    # Currently, superadmin uses the same admin modal as /admin
+    # This provides two command aliases for the same functionality
     launch_admin_modal(client, body["trigger_id"])
 
 @app.view("admin_main")
@@ -2230,12 +2423,12 @@ def handle_save_final(ack, view, body, client):
             print(f"⚠️ Warning: Project '{client_name}' not found in database")
     except KeyError as e:
         print(f"❌ Error accessing view state: {e}")
+        import traceback
+        traceback.print_exc()
     except Exception as e:
         print(f"❌ Error in handle_save_final: {e}")
         import traceback
         traceback.print_exc()
-    except Exception as e:
-        print(f"❌ Error saving project: {e}")
 
 # --- FLASK ROUTES ---
 @flask_app.route("/slack/events", methods=["POST"])
