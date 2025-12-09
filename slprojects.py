@@ -531,7 +531,7 @@ def sync_slack_messages_to_knowledge_base():
             client_name = ch["client"]
             
             # Fetch messages (Now safe from crashing)
-            messages = fetch_channel_messages(channel_id, limit=50)
+            messages = fetch_channel_messages(channel_id, limit=100)
             
             if messages:
                 # Update stats
@@ -588,22 +588,35 @@ def sync_slack_messages_to_knowledge_base():
         print("🧹 Cleaning up old log files from Vector Store...")
         try:
             # List files in vector store
-            files_in_vs = ai_client.vector_stores.files.list(vector_store_id=vector_store_id)
-            for vs_file in files_in_vs:
-                # We can't see the filename easily from VS link alone in some SDK versions
-                # so we check the actual file object if possible, or just rely on IDs
-                # Safer generic strategy: delete older files if we can identify them
-                pass
-                
-            # BETTER STRATEGY: List all files, find ones named "slack_logs_*.txt", delete them
-            # This is hard because file names aren't always preserved perfect in VS list response
-            # But we can try to rely on cleanup by assumption or just keep adding (OpenAI cleans dupes?)
-            # OpenAI does NOT clean dupes automatically, and they account against storage.
+            # Strategy: Delete ALL existing files in this vector store before uploading the new one.
+            # This ensures we consistently have a "fresh start" state and no conflicting history.
             
-            # Implementation: We will just delete ALL 'slack_logs' files we can find to be safe
-            # But searching files is heavy.
-            # Minimal viable: Just upload new one. 
-            pass
+            # 1. List files
+            print("  - Listing existing files...")
+            files_in_vs = ai_client.vector_stores.files.list(vector_store_id=vector_store_id)
+            
+            deleted_count = 0
+            for vs_file in files_in_vs:
+                try:
+                    # Remove from Vector Store
+                    ai_client.vector_stores.files.delete(
+                        vector_store_id=vector_store_id,
+                        file_id=vs_file.id
+                    )
+                    # Also try to delete the underlying file object to save storage space
+                    try:
+                        ai_client.files.delete(file_id=vs_file.id)
+                    except:
+                        pass # It's fine if we fail to delete the global file, as long as it's out of the VS
+                        
+                    deleted_count += 1
+                except Exception as e:
+                    print(f"⚠️ Failed to delete file {vs_file.id}: {e}")
+            
+            if deleted_count > 0:
+                print(f"✅ Removed {deleted_count} old files from knowledge base.")
+            else:
+                print("  - No old files to clean up.")
         except Exception as e:
             print(f"⚠️ Cleanup warning: {e}")
             
@@ -1456,86 +1469,92 @@ def command_project_history(ack, respond, command, body):
 @app.command("/project-history-full")
 @require_authorization
 def command_project_history_full(ack, respond, command, body):
-    """View full change history for a project"""
+    """View full change history for a project (Threaded)"""
     ack()
-    user_id = body.get('user_id')
-    channel_id = body.get('channel_id')
     
-    # Get client name from command text
-    client_name = command.get('text', '').strip()
-    
-    if not client_name:
-        respond(
-            text="Please specify a client name. Example: `/project-history-full Avvika`",
-            response_type="ephemeral"
-        )
-        return
-    
-    projects = load_db()
-    project = None
-    
-    # Find the project
-    for p in projects:
-        if p.get("client", "").lower() == client_name.lower():
-            project = p
-            break
-    
-    if not project:
-        respond(
-            text=f"❌ Project '{client_name}' not found.",
-            response_type="ephemeral"
-        )
-        return
-    
-    # Check authorization for external users
-    context = get_request_context(channel_id)
-    if context.get('role') == 'external':
-        target_client = context.get('client')
-        if project.get('client', '').lower() != target_client.lower():
+    # Run heavy lifting in background thread to prevent timeout
+    def process_history():
+        user_id = body.get('user_id')
+        channel_id = body.get('channel_id')
+        
+        # Get client name from command text
+        client_name = command.get('text', '').strip()
+        
+        if not client_name:
             respond(
-                text="❌ You can only view history for your own project.",
+                text="Please specify a client name. Example: `/project-history-full Avvika`",
                 response_type="ephemeral"
             )
             return
-    
-    # Get history
-    history = project.get("history", [])
-    
-    if not history:
-        respond(
-            text=f"📋 *{project.get('client')}* - No change history yet.",
-            response_type="ephemeral"
-        )
-        return
-    
-    # Format full history
-    history_text = f"📋 *Full Change History for {project.get('client')}*\n\n"
-    history_text += f"*Total Updates:* {len(history)}\n\n"
-    
-    # Show most recent first
-    for idx, entry in enumerate(reversed(history), 1):
-        timestamp = entry.get("timestamp", "Unknown")
-        user = entry.get("user", "Unknown")
-        changes = entry.get("changes", {})
         
-        history_text += f"*{idx}. {timestamp}* by `{user}`\n"
+        projects = load_db()
+        project = None
         
-        for field, change in changes.items():
-            field_name = field.replace('_', ' ').title()
-            old_val = change.get('old', '-')
-            new_val = change.get('new', '-')
+        # Find the project
+        for p in projects:
+            if p.get("client", "").lower() == client_name.lower():
+                project = p
+                break
+        
+        if not project:
+            respond(
+                text=f"❌ Project '{client_name}' not found.",
+                response_type="ephemeral"
+            )
+            return
+        
+        # Check authorization for external users
+        context = get_request_context(channel_id)
+        if context.get('role') == 'external':
+            target_client = context.get('client')
+            if project.get('client', '').lower() != target_client.lower():
+                respond(
+                    text="❌ You can only view history for your own project.",
+                    response_type="ephemeral"
+                )
+                return
+        
+        # Get history
+        history = project.get("history", [])
+        
+        if not history:
+            respond(
+                text=f"📋 *{project.get('client')}* - No change history yet.",
+                response_type="ephemeral"
+            )
+            return
+        
+        # Format full history
+        history_text = f"📋 *Full Change History for {project.get('client')}*\n\n"
+        history_text += f"*Total Updates:* {len(history)}\n\n"
+        
+        # Show most recent first
+        for idx, entry in enumerate(reversed(history), 1):
+            timestamp = entry.get("timestamp", "Unknown")
+            user = entry.get("user", "Unknown")
+            changes = entry.get("changes", {})
             
-            # Truncate long values
-            if len(old_val) > 80:
-                old_val = old_val[:77] + "..."
-            if len(new_val) > 80:
-                new_val = new_val[:77] + "..."
+            history_text += f"*{idx}. {timestamp}* by `{user}`\n"
             
-            history_text += f"   • *{field_name}:* `{old_val}` → `{new_val}`\n"
+            for field, change in changes.items():
+                field_name = field.replace('_', ' ').title()
+                old_val = change.get('old', '-')
+                new_val = change.get('new', '-')
+                
+                # Truncate long values
+                if len(old_val) > 80:
+                    old_val = old_val[:77] + "..."
+                if len(new_val) > 80:
+                    new_val = new_val[:77] + "..."
+                
+                history_text += f"   • *{field_name}:* `{old_val}` → `{new_val}`\n"
+            
+            history_text += "\n"
         
-        history_text += "\n"
-    
-    respond(text=history_text, response_type="ephemeral")
+        respond(text=history_text, response_type="ephemeral")
+
+    # Start background thread
+    threading.Thread(target=process_history).start()
 # ==========================================
 # FEATURE: ASK COMMAND (THREADED FIX)
 # ==========================================
