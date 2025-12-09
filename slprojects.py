@@ -2647,6 +2647,8 @@ def health_check():
 def initialize_app():
     """Initialize app on startup"""
     print("🚀 Initializing Shopline Project Bot...")
+    import openai
+    print(f"📦 OpenAI SDK Version: {openai.__version__}")
     
     # Setup OpenAI Assistant (if configured)
     if ai_client:
