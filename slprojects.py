@@ -330,13 +330,15 @@ def require_authorization(internal_only=False):
 # ==========================================
 def setup_openai_assistant():
     """Initialize or retrieve OpenAI Assistant with knowledge base (Robust Version)"""
+    global ASSISTANT_ID, VECTOR_STORE_ID # Update globals to persist in-memory across calls matches
+    
     if not ai_client:
         print("⚠️ OpenAI client not configured. Assistant features disabled.")
         return None, None
     
     try:
         assistant = None
-        vector_store_id = VECTOR_STORE_ID
+        current_vs_id = VECTOR_STORE_ID
         
         # 1. Retrieve or Create Assistant
         if ASSISTANT_ID:
@@ -347,23 +349,25 @@ def setup_openai_assistant():
                 print(f"⚠️ Assistant {ASSISTANT_ID} not found (Error: {e}). Creating new one...")
         
         # 2. Retrieve or Create Vector Store
-        if vector_store_id:
+        if current_vs_id:
             try:
                 # Prove access to the vector store
-                ai_client.beta.vector_stores.retrieve(vector_store_id)
-                print(f"✅ Found existing vector store: {vector_store_id}")
+                ai_client.beta.vector_stores.retrieve(current_vs_id)
+                print(f"✅ Found existing vector store: {current_vs_id}")
             except Exception:
-                print(f"⚠️ Vector Store {vector_store_id} not found. Creating new one...")
-                vector_store_id = None # Reset to trigger creation
+                print(f"⚠️ Vector Store {current_vs_id} not found. Creating new one...")
+                current_vs_id = None # Reset to trigger creation
         
-        if not vector_store_id:
+        if not current_vs_id:
             try:
                 vs = ai_client.beta.vector_stores.create(name="Projects Knowledge Base")
-                vector_store_id = vs.id
-                print(f"✅ Created new vector store: {vector_store_id}")
+                current_vs_id = vs.id
+                print(f"✅ Created new vector store: {current_vs_id}")
+                # Update global immediately
+                VECTOR_STORE_ID = current_vs_id
             except Exception as e:
                 print(f"❌ Error creating vector store: {e}")
-                return None, None
+                raise e
         
         # 3. Create or Update Assistant with Vector Store
         instructions = (
@@ -402,14 +406,15 @@ def setup_openai_assistant():
             # Check if vector store is attached
             current_vs_ids = []
             if assistant.tool_resources and assistant.tool_resources.file_search:
+                # Handle simplified resource structure if needed, but standard is this:
                 current_vs_ids = assistant.tool_resources.file_search.vector_store_ids or []
             
-            if vector_store_id not in current_vs_ids:
-                print(f"🔄 Attaching vector store {vector_store_id} to assistant {assistant.id}")
+            if current_vs_id not in current_vs_ids:
+                print(f"🔄 Attaching vector store {current_vs_id} to assistant {assistant.id}")
                 ai_client.beta.assistants.update(
                     assistant_id=assistant.id,
                     instructions=instructions,
-                    tool_resources={"file_search": {"vector_store_ids": [vector_store_id]}}
+                    tool_resources={"file_search": {"vector_store_ids": [current_vs_id]}}
                 )
             else:
                 # Just update instructions
@@ -425,24 +430,29 @@ def setup_openai_assistant():
                 instructions=instructions,
                 model=OPENAI_MODEL,
                 tools=[{"type": "file_search"}],
-                tool_resources={"file_search": {"vector_store_ids": [vector_store_id]}}
+                tool_resources={"file_search": {"vector_store_ids": [current_vs_id]}}
             )
             print(f"✅ Created assistant: {assistant.id}")
+            # Update global immediately
+            ASSISTANT_ID = assistant.id
         
         # Verify IDs before returning
         print(f"ℹ️  Environment Check:")
         if assistant.id != ASSISTANT_ID:
             print(f"⚠️  Please update OPENAI_ASSISTANT_ID={assistant.id}")
-        if vector_store_id != VECTOR_STORE_ID:
-            print(f"⚠️  Please update OPENAI_VECTOR_STORE_ID={vector_store_id}")
+            ASSISTANT_ID = assistant.id
+        if current_vs_id != VECTOR_STORE_ID:
+            print(f"⚠️  Please update OPENAI_VECTOR_STORE_ID={current_vs_id}")
+            VECTOR_STORE_ID = current_vs_id
             
-        return assistant.id, vector_store_id
+        return assistant.id, current_vs_id
         
     except Exception as e:
         print(f"❌ Error setting up assistant: {e}")
         import traceback
         traceback.print_exc()
-        return None, None
+        # Raise exception to caller so they know WHY it failed
+        raise e
 
 def fetch_channel_messages(channel_id, limit=100):
     """Fetch recent messages from a Slack channel (Robust Version)"""
@@ -504,9 +514,13 @@ def sync_slack_messages_to_knowledge_base():
         return "❌ AI Client not configured"
     
     # Get IDs (and ensure they exist)
-    assistant_id, vector_store_id = setup_openai_assistant()
+    try:
+        assistant_id, vector_store_id = setup_openai_assistant()
+    except Exception as e:
+        return f"❌ Assistant Setup Failed: {str(e)}"
+        
     if not assistant_id or not vector_store_id:
-        return "❌ Assistant/Vector Store setup failed"
+        return "❌ Assistant/Vector Store setup failed (Unknown Error)"
     
     try:
         all_messages = []
