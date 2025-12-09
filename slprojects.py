@@ -319,13 +319,51 @@ def get_system_prompt(user_email, client_name=None):
         base_prompt = prompts.get("internal_admin", {}).get("prompt",
             "You are a Project Assistant. Be helpful and professional.")
     
+    # Slack formatting instructions
+    slack_formatting = (
+        "\n\nFORMATTING RULES (You are responding in Slack):\n"
+        "- Use *bold* for emphasis (NOT **bold**)\n"
+        "- Use _italic_ for emphasis (NOT *italic*)\n"
+        "- Use bullet points with • or -\n"
+        "- Use numbered lists: 1. 2. 3.\n"
+        "- Use `code` for technical terms\n"
+        "- Use > for quotes\n"
+        "- Keep responses concise and scannable\n"
+        "- Use emojis sparingly for visual breaks (✅ ❌ 📌 🔴 🟢)\n"
+        "- Do NOT use ### or #### for headers - use *Bold Title* instead\n"
+        "- Do NOT use [text](url) format - just paste the URL directly"
+    )
+    
     # Combine with rules
-    full_prompt = f"{base_prompt}\n\n{general_rules}\n\n{security_warning}"
+    full_prompt = f"{base_prompt}\n\n{general_rules}\n\n{security_warning}{slack_formatting}"
     return full_prompt
 
 
 
 # --- HELPER: USER AUTHORIZATION ---
+# Cache for user names to avoid repeated API calls
+_user_name_cache = {}
+
+def get_user_name(user_id):
+    """Get user display name from Slack user ID (with caching)"""
+    global _user_name_cache
+    
+    if user_id in _user_name_cache:
+        return _user_name_cache[user_id]
+    
+    try:
+        user_info = app.client.users_info(user=user_id)
+        if user_info.get("ok"):
+            profile = user_info["user"].get("profile", {})
+            # Try display name, then real name, then fallback
+            name = profile.get("display_name") or profile.get("real_name") or user_id
+            _user_name_cache[user_id] = name
+            return name
+    except Exception as e:
+        print(f"⚠️ Could not get name for {user_id}: {e}")
+    
+    return user_id  # Return ID if we can't get name
+
 def get_user_email(user_id, client):
     """Get user email from Slack user ID"""
     try:
@@ -702,12 +740,14 @@ def sync_slack_messages_to_knowledge_base():
 
         print(f"📥 Starting sync for {len(channels_to_sync)} channels...")
 
+        latest_timestamp = 0  # Track the most recent message
+        
         for ch in channels_to_sync:
             channel_id = ch["id"]
             client_name = ch["client"]
             
             # Fetch messages (Now safe from crashing)
-            messages = fetch_channel_messages(channel_id, limit=100)
+            messages = fetch_channel_messages(channel_id, limit=200)
             
             if messages:
                 # Update stats
@@ -717,12 +757,23 @@ def sync_slack_messages_to_knowledge_base():
                     stats["channels"] += len(messages)
                 
                 for msg in messages:
+                    # Track latest message timestamp
+                    try:
+                        msg_ts = float(msg["ts"])
+                        if msg_ts > latest_timestamp:
+                            latest_timestamp = msg_ts
+                    except:
+                        pass
+                    
+                    # Convert user ID to name
+                    user_name = get_user_name(msg["user"]) if msg["user"] != "unknown" else "Unknown"
+                    
                     all_messages.append({
                         "client": client_name,
                         "type": "Email" if client_name == "MAILBOX_INBOX" else "Slack Chat",
                         "content": msg["text"],
                         "timestamp": msg["ts"],
-                        "user": msg["user"]
+                        "user": user_name
                     })
         
         if not all_messages:
@@ -822,11 +873,29 @@ def sync_slack_messages_to_knowledge_base():
         # Cleanup local file
         os.unlink(final_path)
         
+        # Calculate time-ago for latest message
+        latest_msg_ago = "Unknown"
+        if latest_timestamp > 0:
+            try:
+                import time
+                seconds_ago = time.time() - latest_timestamp
+                if seconds_ago < 60:
+                    latest_msg_ago = f"{int(seconds_ago)} sec ago"
+                elif seconds_ago < 3600:
+                    latest_msg_ago = f"{int(seconds_ago / 60)} min ago"
+                elif seconds_ago < 86400:
+                    latest_msg_ago = f"{int(seconds_ago / 3600)} hours ago"
+                else:
+                    latest_msg_ago = f"{int(seconds_ago / 86400)} days ago"
+            except:
+                latest_msg_ago = datetime.fromtimestamp(latest_timestamp).strftime('%Y-%m-%d %H:%M')
+        
         return (
             f"✅ *Sync Complete!*\n"
             f"📧 Emails (Mailbox): {stats['mailbox']}\n"
             f"💬 Slack Messages: {stats['channels']}\n"
             f"📚 Total Items: {len(all_messages)}\n"
+            f"🕐 Latest Message: {latest_msg_ago}\n"
             f"🆔 Vector Store: `{vector_store_id}`"
         )
         
