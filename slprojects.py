@@ -2859,7 +2859,7 @@ def require_superadmin(func):
     return wrapper
 
 
-@app.command("/admin-add-channel")
+@app.command("/add-channel")
 @require_superadmin
 def command_admin_add_channel(ack, respond, command, body, client):
     """Add a channel to the channel_map
@@ -2924,7 +2924,7 @@ def command_admin_add_channel(ack, respond, command, body, client):
         respond(text="❌ Error saving config", response_type="ephemeral")
 
 
-@app.command("/admin-remove-channel")
+@app.command("/remove-channel")
 @require_superadmin
 def command_admin_remove_channel(ack, respond, command, body, client):
     """Remove a channel from the channel_map
@@ -2965,7 +2965,7 @@ def command_admin_remove_channel(ack, respond, command, body, client):
         respond(text="❌ Error saving config", response_type="ephemeral")
 
 
-@app.command("/admin-add-merchant")
+@app.command("/add-merchant")
 @require_superadmin
 def command_admin_add_merchant(ack, respond, command, body, client):
     """Add a merchant email to the user_map
@@ -3027,7 +3027,7 @@ def command_admin_add_merchant(ack, respond, command, body, client):
         respond(text="❌ Error saving config", response_type="ephemeral")
 
 
-@app.command("/admin-remove-merchant")
+@app.command("/remove-merchant")
 @require_superadmin
 def command_admin_remove_merchant(ack, respond, command, body, client):
     """Remove a merchant email from the user_map
@@ -3075,7 +3075,7 @@ def command_admin_remove_merchant(ack, respond, command, body, client):
         respond(text="❌ Error saving config", response_type="ephemeral")
 
 
-@app.command("/admin-list-config")
+@app.command("/list-config")
 @require_superadmin
 def command_admin_list_config(ack, respond, command, body, client):
     """List current config summary
@@ -3176,7 +3176,7 @@ def command_admin_list_config(ack, respond, command, body, client):
         )
 
 
-@app.command("/admin-reload-config")
+@app.command("/reload-config")
 @require_superadmin
 def command_admin_reload_config(ack, respond, command, body, client):
     """Reload config from file/environment"""
