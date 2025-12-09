@@ -689,9 +689,9 @@ def sync_slack_messages_to_knowledge_base():
         
         # Add project channels
         for cid, ctx in CHANNEL_MAP.items():
-            if ctx.get("role") in ["internal", "external"]:
+            if ctx.get("type") in ["internal", "external"]:
                 channels_to_sync.append({
-                    "id": cid, "client": ctx.get("client", "Unknown"), "role": ctx.get("role", "internal")
+                    "id": cid, "client": ctx.get("client", "Unknown"), "type": ctx.get("type", "internal")
                 })
         
         # Add Mailbox Channel
