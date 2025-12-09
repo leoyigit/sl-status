@@ -62,17 +62,66 @@ def load_config():
     except FileNotFoundError:
         print("⚠️ config.json not found and CONFIG_JSON not set.")
         print("⚠️ Using default empty configuration.")
-        return {"mailbox_channel_id": "", "channel_map": {}, "authorized_users": [], "external_authorized_users": []}
+        return {"settings": {}, "roles": {}, "channel_map": {}}
     except json.JSONDecodeError as e:
         print(f"❌ Error parsing config.json: {e}")
-        return {"mailbox_channel_id": "", "channel_map": {}, "authorized_users": [], "external_authorized_users": []}
+        return {"settings": {}, "roles": {}, "channel_map": {}}
 
 # Load the config once when the app starts
 app_config = load_config()
-MAILBOX_CHANNEL_ID = app_config.get("mailbox_channel_id")
+
+def load_prompts():
+    """Loads prompts from environment variable or prompts.json file"""
+    prompts_json = os.environ.get("PROMPTS_JSON")
+    if prompts_json:
+        try:
+            prompts = json.loads(prompts_json)
+            print("✅ Loaded prompts from PROMPTS_JSON environment variable")
+            return prompts
+        except json.JSONDecodeError as e:
+            print(f"❌ Error parsing PROMPTS_JSON: {e}")
+    
+    try:
+        with open("prompts.json", "r") as f:
+            prompts = json.load(f)
+            print("✅ Loaded prompts from prompts.json file")
+            return prompts
+    except FileNotFoundError:
+        print("⚠️ prompts.json not found. Using default prompts.")
+        return {"system_prompts": {}, "data_retrieval_rules": {}, "email_processing_prompt": {}}
+    except json.JSONDecodeError as e:
+        print(f"❌ Error parsing prompts.json: {e}")
+        return {"system_prompts": {}, "data_retrieval_rules": {}, "email_processing_prompt": {}}
+
+app_prompts = load_prompts()
+
+# Extract settings from new config structure
+SETTINGS = app_config.get("settings", {})
+MAILBOX_CHANNEL_ID = SETTINGS.get("mailbox_channel_id")
+MAIN_CHANNEL_ID = SETTINGS.get("main_channel_id")
+SHOPLINE_INTERNAL_CHANNEL_ID = SETTINGS.get("shopline_internal_channel_id")
+SHOPLINE_PARTNER_CHANNEL_ID = SETTINGS.get("shopline_partner_channel_id")
+
+# Extract roles and channel map from config
+ROLES = app_config.get("roles", {})
 CHANNEL_MAP = app_config.get("channel_map", {})
-AUTHORIZED_USERS = app_config.get("authorized_users", [])  # List of authorized email addresses for INTERNAL channels
-EXTERNAL_AUTHORIZED_USERS = app_config.get("external_authorized_users", [])  # List of authorized email addresses for EXTERNAL channels
+
+# Build authorized users lists from roles for backward compatibility
+def _build_authorized_users():
+    """Build authorized user lists from roles config"""
+    internal_users = ROLES.get("internal", {}).get("users", [])
+    partner_users = ROLES.get("partner", {}).get("users", [])
+    merchant_users = list(ROLES.get("merchants", {}).get("user_map", {}).keys())
+    
+    # Internal users = powercommerce/flyrank team
+    authorized = internal_users.copy()
+    
+    # External authorized = partners + merchants
+    external_authorized = partner_users + merchant_users
+    
+    return authorized, external_authorized
+
+AUTHORIZED_USERS, EXTERNAL_AUTHORIZED_USERS = _build_authorized_users()
 
 # --- HELPER: CONFIG MANAGEMENT ---
 def save_config(config):
@@ -81,7 +130,9 @@ def save_config(config):
     Note: If using CONFIG_JSON environment variable, you'll need to update it manually
     in your deployment platform (e.g., Render) after making changes here.
     """
-    global app_config, MAILBOX_CHANNEL_ID, CHANNEL_MAP, AUTHORIZED_USERS, EXTERNAL_AUTHORIZED_USERS
+    global app_config, SETTINGS, MAILBOX_CHANNEL_ID, MAIN_CHANNEL_ID, CHANNEL_MAP, ROLES
+    global AUTHORIZED_USERS, EXTERNAL_AUTHORIZED_USERS
+    global SHOPLINE_INTERNAL_CHANNEL_ID, SHOPLINE_PARTNER_CHANNEL_ID
     
     try:
         # Save to config.json file
@@ -90,10 +141,14 @@ def save_config(config):
         
         # Update in-memory variables
         app_config = config
-        MAILBOX_CHANNEL_ID = config.get("mailbox_channel_id")
+        SETTINGS = config.get("settings", {})
+        MAILBOX_CHANNEL_ID = SETTINGS.get("mailbox_channel_id")
+        MAIN_CHANNEL_ID = SETTINGS.get("main_channel_id")
+        SHOPLINE_INTERNAL_CHANNEL_ID = SETTINGS.get("shopline_internal_channel_id")
+        SHOPLINE_PARTNER_CHANNEL_ID = SETTINGS.get("shopline_partner_channel_id")
+        ROLES = config.get("roles", {})
         CHANNEL_MAP = config.get("channel_map", {})
-        AUTHORIZED_USERS = config.get("authorized_users", [])
-        EXTERNAL_AUTHORIZED_USERS = config.get("external_authorized_users", [])
+        AUTHORIZED_USERS, EXTERNAL_AUTHORIZED_USERS = _build_authorized_users()
         
         print("✅ Config saved successfully to config.json")
         print("⚠️ If using CONFIG_JSON environment variable, update it in your deployment platform")
@@ -106,15 +161,23 @@ def save_config(config):
 
 def reload_config():
     """Reload config from file/environment"""
-    global app_config, MAILBOX_CHANNEL_ID, CHANNEL_MAP, AUTHORIZED_USERS, EXTERNAL_AUTHORIZED_USERS
+    global app_config, app_prompts, SETTINGS, MAILBOX_CHANNEL_ID, MAIN_CHANNEL_ID
+    global CHANNEL_MAP, ROLES, AUTHORIZED_USERS, EXTERNAL_AUTHORIZED_USERS
+    global SHOPLINE_INTERNAL_CHANNEL_ID, SHOPLINE_PARTNER_CHANNEL_ID
     
     app_config = load_config()
-    MAILBOX_CHANNEL_ID = app_config.get("mailbox_channel_id")
-    CHANNEL_MAP = app_config.get("channel_map", {})
-    AUTHORIZED_USERS = app_config.get("authorized_users", [])
-    EXTERNAL_AUTHORIZED_USERS = app_config.get("external_authorized_users", [])
+    app_prompts = load_prompts()
     
-    print("✅ Config reloaded")
+    SETTINGS = app_config.get("settings", {})
+    MAILBOX_CHANNEL_ID = SETTINGS.get("mailbox_channel_id")
+    MAIN_CHANNEL_ID = SETTINGS.get("main_channel_id")
+    SHOPLINE_INTERNAL_CHANNEL_ID = SETTINGS.get("shopline_internal_channel_id")
+    SHOPLINE_PARTNER_CHANNEL_ID = SETTINGS.get("shopline_partner_channel_id")
+    ROLES = app_config.get("roles", {})
+    CHANNEL_MAP = app_config.get("channel_map", {})
+    AUTHORIZED_USERS, EXTERNAL_AUTHORIZED_USERS = _build_authorized_users()
+    
+    print("✅ Config and prompts reloaded")
 
 
 # --- APP SETUP ---
@@ -147,7 +210,120 @@ def save_db(data):
 # --- HELPER: CONTEXT SECURITY ---
 def get_request_context(channel_id):
     """Determines if the request is Internal (Full Access) or External (Restricted)."""
-    return CHANNEL_MAP.get(channel_id, {"client": None, "role": "internal"}) # Default to internal if unknown/DM
+    channel_info = CHANNEL_MAP.get(channel_id, {})
+    if channel_info:
+        return {
+            "client": channel_info.get("client"),
+            "role": "external" if channel_info.get("type") == "external" else "internal"
+        }
+    # Default to internal if unknown/DM
+    return {"client": None, "role": "internal"}
+
+def get_user_role(user_email):
+    """Determine user's role based on their email address.
+    
+    Returns:
+        str: 'internal', 'partner', or 'merchant'
+    """
+    if not user_email:
+        return None
+    
+    email_lower = user_email.lower()
+    
+    # Check internal users (powercommerce/flyrank)
+    internal_users = ROLES.get("internal", {}).get("users", [])
+    internal_domains = ROLES.get("internal", {}).get("domains", [])
+    
+    if email_lower in [u.lower() for u in internal_users]:
+        return "internal"
+    
+    for domain in internal_domains:
+        if email_lower.endswith(f"@{domain}"):
+            return "internal"
+    
+    # Check partner users (shopline)
+    partner_users = ROLES.get("partner", {}).get("users", [])
+    partner_domains = ROLES.get("partner", {}).get("domains", [])
+    
+    if email_lower in [u.lower() for u in partner_users]:
+        return "partner"
+    
+    for domain in partner_domains:
+        if email_lower.endswith(f"@{domain}"):
+            return "partner"
+    
+    # Check merchant users
+    merchant_map = ROLES.get("merchants", {}).get("user_map", {})
+    if email_lower in [u.lower() for u in merchant_map.keys()]:
+        return "merchant"
+    
+    return None
+
+def get_merchant_client(user_email):
+    """Get the client name for a merchant user"""
+    if not user_email:
+        return None
+    
+    email_lower = user_email.lower()
+    merchant_map = ROLES.get("merchants", {}).get("user_map", {})
+    
+    for email, client in merchant_map.items():
+        if email.lower() == email_lower:
+            return client
+    return None
+
+def get_channel_type(channel_id):
+    """Get channel type (internal/external) from channel map"""
+    channel_info = CHANNEL_MAP.get(channel_id, {})
+    return channel_info.get("type", "internal")
+
+def is_superadmin(user_email):
+    """Check if user is a superadmin (internal team member)"""
+    return get_user_role(user_email) == "internal"
+
+def get_system_prompt(user_email, client_name=None):
+    """Get the appropriate system prompt based on user role.
+    
+    Args:
+        user_email: User's email address
+        client_name: Optional client name for context
+    
+    Returns:
+        str: The system prompt for the user's role
+    """
+    role = get_user_role(user_email)
+    prompts = app_prompts.get("system_prompts", {})
+    retrieval_rules = app_prompts.get("data_retrieval_rules", {})
+    
+    # Get base rules
+    general_rules = retrieval_rules.get("general", "")
+    security_warning = retrieval_rules.get("security_warning", "")
+    
+    if role == "internal":
+        base_prompt = prompts.get("internal_admin", {}).get("prompt", 
+            "You are the Project Operations Manager for the internal team. Be direct, highlight blockers and risks.")
+    elif role == "partner":
+        base_prompt = prompts.get("partner_shopline", {}).get("prompt",
+            "You are a Technical Partner Liaison for Shopline. Be professional and collaborative.")
+    elif role == "merchant":
+        template = prompts.get("merchant_client", {}).get("prompt",
+            "You are a dedicated Project Assistant for {client_name}. Be professional and helpful.")
+        # Fill in template variables
+        user_first_name = user_email.split("@")[0].split(".")[0].title() if user_email else "User"
+        base_prompt = template.format(
+            client_name=client_name or "your project",
+            user_first_name=user_first_name
+        )
+    else:
+        # Fallback for unknown users
+        base_prompt = prompts.get("internal_admin", {}).get("prompt",
+            "You are a Project Assistant. Be helpful and professional.")
+    
+    # Combine with rules
+    full_prompt = f"{base_prompt}\n\n{general_rules}\n\n{security_warning}"
+    return full_prompt
+
+
 
 # --- HELPER: USER AUTHORIZATION ---
 def get_user_email(user_id, client):
@@ -977,14 +1153,29 @@ def command_download_pdf(ack, client, body):
 # ==========================================
 # FEATURE: AI ENGINE (CONTEXT AWARE)
 # ==========================================
-def process_ai_query(user_query, channel_id, reply_func):
+def process_ai_query(user_query, channel_id, reply_func, user_email=None):
+    """Process an AI query with role-based prompts from config.
+    
+    Args:
+        user_query: The user's question
+        channel_id: Slack channel ID
+        reply_func: Function to send replies
+        user_email: Optional user email for role detection
+    """
     projects = load_db()
     context = get_request_context(channel_id)
-    role = context['role']
+    channel_role = context['role']
     target_client = context['client']
+    
+    # Determine user role for prompt selection
+    user_role = get_user_role(user_email) if user_email else None
+    
+    # If user is a merchant, get their client
+    if user_role == "merchant" and not target_client:
+        target_client = get_merchant_client(user_email)
 
     # --- SECURITY FILTERING ---
-    if role == 'external':
+    if channel_role == 'external' or user_role == 'merchant':
         if not target_client:
             reply_func("❌ Error: Client mapping not configured for this channel.")
             return
@@ -994,28 +1185,29 @@ def process_ai_query(user_query, channel_id, reply_func):
             reply_func("I can only discuss project details related to this channel.")
             return
         
-        # 2. Sanitize Data (Remove internal fields if you add them later)
+        # 2. Sanitize Data (Remove internal fields)
         safe_projects = []
         for p in projects:
-            # Create a clean copy without sensitive internal fields
             safe_p = {k: v for k, v in p.items() if k not in ['internal_notes', 'budget']}
             safe_projects.append(safe_p)
             
-        system_prompt = (
-            f"You are a helpful Project Assistant for {target_client}. "
-            "You are speaking directly to the CLIENT. "
-            "Be professional, polite, and focused on progress. "
-            "Do not mention other clients."
-        )
+        # Get role-based prompt
+        system_prompt = get_system_prompt(user_email, target_client)
+        data_context = json.dumps(safe_projects, indent=2)
+    
+    elif user_role == 'partner':
+        # Partners can see all projects but with limited internal info
+        safe_projects = []
+        for p in projects:
+            safe_p = {k: v for k, v in p.items() if k not in ['internal_notes', 'budget']}
+            safe_projects.append(safe_p)
+        
+        system_prompt = get_system_prompt(user_email, target_client)
         data_context = json.dumps(safe_projects, indent=2)
 
     else:
-        # Internal Team Context
-        system_prompt = (
-            "You are the Project Operations Manager for the internal team. "
-            "You are speaking to developers and PMs. "
-            "Be direct, highlight blockers, and risks."
-        )
+        # Internal Team Context - full access
+        system_prompt = get_system_prompt(user_email, target_client)
         data_context = json.dumps(projects, indent=2)
 
     # --- OPENAI CALL ---
@@ -1087,8 +1279,9 @@ def handle_mentions(event, say, client):
         # We need to simulate the body structure for the command function, or just call logic directly
         say("Please use the `/download-report` command for PDFs.")
     else:
-        # Default to AI
-        process_ai_query(text, channel, say)
+        # Default to AI - get user email for role-based prompt
+        user_email = get_user_email(user_id, client)
+        process_ai_query(text, channel, say, user_email)
 
 def process_email_for_status_update(text, channel_id=None, event_ts=None, user_id=None):
     """Enhanced email processing: updates status and logs brief history"""
@@ -1380,91 +1573,96 @@ def command_publish_report(ack, client, body):
 @app.command("/project-history")
 @require_authorization
 def command_project_history(ack, respond, command, body):
-    """View change history for a project"""
+    """View change history for a project (Threaded)"""
     ack()
-    user_id = body.get('user_id')
-    channel_id = body.get('channel_id')
     
-    # Get client name from command text
-    client_name = command.get('text', '').strip()
-    
-    if not client_name:
-        respond(
-            text="Please specify a client name. Example: `/project-history Avvika`",
-            response_type="ephemeral"
-        )
-        return
-    
-    projects = load_db()
-    project = None
-    
-    # Find the project
-    for p in projects:
-        if p.get("client", "").lower() == client_name.lower():
-            project = p
-            break
-    
-    if not project:
-        respond(
-            text=f"❌ Project '{client_name}' not found.",
-            response_type="ephemeral"
-        )
-        return
-    
-    # Check authorization for external users
-    context = get_request_context(channel_id)
-    if context.get('role') == 'external':
-        target_client = context.get('client')
-        if project.get('client', '').lower() != target_client.lower():
+    def process_history():
+        user_id = body.get('user_id')
+        channel_id = body.get('channel_id')
+        
+        # Get client name from command text
+        client_name = command.get('text', '').strip()
+        
+        if not client_name:
             respond(
-                text="❌ You can only view history for your own project.",
+                text="Please specify a client name. Example: `/project-history Avvika`",
                 response_type="ephemeral"
             )
             return
-    
-    # Get history
-    history = project.get("history", [])
-    
-    if not history:
-        respond(
-            text=f"📋 *{project.get('client')}* - No change history yet.\n\nThis project hasn't been updated since history tracking was enabled.",
-            response_type="ephemeral"
-        )
-        return
-    
-    # Format history (show last 10 entries)
-    history_text = f"📋 *Change History for {project.get('client')}*\n\n"
-    history_text += f"*Total Updates:* {len(history)}\n"
-    history_text += f"*Last Updated:* {project.get('last_updated', 'N/A')}\n\n"
-    history_text += "*Recent Changes (Last 10):*\n\n"
-    
-    # Show most recent first
-    for entry in reversed(history[-10:]):
-        timestamp = entry.get("timestamp", "Unknown")
-        user = entry.get("user", "Unknown")
-        changes = entry.get("changes", {})
         
-        history_text += f"🕐 *{timestamp}* by `{user}`\n"
+        projects = load_db()
+        project = None
         
-        for field, change in changes.items():
-            field_name = field.replace('_', ' ').title()
-            old_val = change.get('old', '-')
-            new_val = change.get('new', '-')
+        # Find the project
+        for p in projects:
+            if p.get("client", "").lower() == client_name.lower():
+                project = p
+                break
+        
+        if not project:
+            respond(
+                text=f"❌ Project '{client_name}' not found.",
+                response_type="ephemeral"
+            )
+            return
+        
+        # Check authorization for external users
+        context = get_request_context(channel_id)
+        if context.get('role') == 'external':
+            target_client = context.get('client')
+            if project.get('client', '').lower() != target_client.lower():
+                respond(
+                    text="❌ You can only view history for your own project.",
+                    response_type="ephemeral"
+                )
+                return
+        
+        # Get history
+        history = project.get("history", [])
+        
+        if not history:
+            respond(
+                text=f"📋 *{project.get('client')}* - No change history yet.\n\nThis project hasn't been updated since history tracking was enabled.",
+                response_type="ephemeral"
+            )
+            return
+        
+        # Format history (show last 10 entries)
+        history_text = f"📋 *Change History for {project.get('client')}*\n\n"
+        history_text += f"*Total Updates:* {len(history)}\n"
+        history_text += f"*Last Updated:* {project.get('last_updated', 'N/A')}\n\n"
+        history_text += "*Recent Changes (Last 10):*\n\n"
+        
+        # Show most recent first
+        for entry in reversed(history[-10:]):
+            timestamp = entry.get("timestamp", "Unknown")
+            user = entry.get("user", "Unknown")
+            changes = entry.get("changes", {})
             
-            # Truncate long values
-            if len(old_val) > 50:
-                old_val = old_val[:47] + "..."
-            if len(new_val) > 50:
-                new_val = new_val[:47] + "..."
+            history_text += f"🕐 *{timestamp}* by `{user}`\n"
             
-            history_text += f"   • *{field_name}:* `{old_val}` → `{new_val}`\n"
+            for field, change in changes.items():
+                field_name = field.replace('_', ' ').title()
+                old_val = change.get('old', '-')
+                new_val = change.get('new', '-')
+                
+                # Truncate long values
+                if len(old_val) > 50:
+                    old_val = old_val[:47] + "..."
+                if len(new_val) > 50:
+                    new_val = new_val[:47] + "..."
+                
+                history_text += f"   • *{field_name}:* `{old_val}` → `{new_val}`\n"
+            
+            history_text += "\n"
         
-        history_text += "\n"
-    
-    if len(history) > 10:
-        history_text += f"\n_Showing last 10 of {len(history)} total changes. Use `/project-history-full {client_name}` to see all._"
-    
-    respond(text=history_text, response_type="ephemeral")
+        if len(history) > 10:
+            history_text += f"\n_Showing last 10 of {len(history)} total changes. Use `/project-history-full {client_name}` to see all._"
+        
+        respond(text=history_text, response_type="ephemeral")
+
+    # Start background thread
+    threading.Thread(target=process_history).start()
 
 @app.command("/project-history-full")
 @require_authorization
@@ -1597,11 +1795,19 @@ def process_ask_background(respond, query_text, channel_id, user_id, client):
         # Load Data
         projects = load_db()
         context = get_request_context(channel_id)
-        role = context.get('role', 'internal')
+        channel_role = context.get('role', 'internal')
         target_client = context.get('client')
+        
+        # Get user email for role detection
+        user_email = get_user_email(user_id, client)
+        user_role = get_user_role(user_email) if user_email else None
+        
+        # If user is a merchant, get their client
+        if user_role == "merchant" and not target_client:
+            target_client = get_merchant_client(user_email)
 
         # Security & Context Setup
-        if role == 'external':
+        if channel_role == 'external' or user_role == 'merchant':
             if not target_client:
                 respond(text="❌ Error: Client mapping not configured for this channel.", response_type="ephemeral")
                 return
@@ -1610,43 +1816,42 @@ def process_ask_background(respond, query_text, channel_id, user_id, client):
                 respond(text="I can only discuss project details related to this channel.", response_type="ephemeral")
                 return
             
-            # Sanitize for external
+            # Sanitize for external/merchant
             safe_projects = []
             for p in projects:
                 safe_p = {k: v for k, v in p.items() if k not in ['internal_notes', 'budget']}
                 safe_projects.append(safe_p)
             
-            system_prompt = (
-                f"You are a helpful Project Assistant for {target_client}. "
-                "You are speaking directly to the CLIENT. "
-                "Be professional, polite, and focused on progress. "
-                "Do not mention other clients."
-            )
+            system_prompt = get_system_prompt(user_email, target_client)
             data_context = json.dumps(safe_projects, indent=2)
+        
+        elif user_role == 'partner':
+            # Partners see all but limited internal info
+            safe_projects = []
+            for p in projects:
+                safe_p = {k: v for k, v in p.items() if k not in ['internal_notes', 'budget']}
+                safe_projects.append(safe_p)
+            
+            system_prompt = get_system_prompt(user_email, target_client)
+            data_context = json.dumps(safe_projects, indent=2)
+        
         else:
-            # Internal
-            system_prompt = (
-                "You are the Project Operations Manager for the internal team. "
-                "You are speaking to developers and PMs. "
-                "Be direct, highlight blockers, and risks."
-            )
+            # Internal - full access
+            system_prompt = get_system_prompt(user_email, target_client)
             data_context = json.dumps(projects, indent=2)
 
         if not ai_client:
             respond(text="⚠️ AI Client not configured.", response_type="ephemeral")
             return
 
-        # FALLBACK: If user asked about emails but Assistant didn't find them, be honest
+        # FALLBACK: If user asked about emails but Assistant didn't find them
         if any(keyword in query_lower for keyword in ['email', 'mailbox', 'mail', 'message']):
-            fallback_prompt = (
-                f"{system_prompt}\n\n"
-                f"⚠️ IMPORTANT: The user asked about emails/communications, but the Knowledge Base search "
-                f"did not return results or timed out. You only have access to structured project data below. "
-                f"If the answer isn't in the project data, tell them: 'I couldn't find email content in the "
-                f"knowledge base. Please try running `/sync-knowledge messages` to update the email logs, "
-                f"or check the mailbox channel directly.'\n\n"
-                f"PROJECT DATA:\n{data_context}"
+            # Get fallback message from prompts config
+            fallback_append = app_prompts.get("ask_command", {}).get("email_fallback_prompt", {}).get(
+                "prompt_append", 
+                "⚠️ I couldn't find that information in your authorized project data."
             )
+            fallback_prompt = f"{system_prompt}\n\n{fallback_append}\n\nPROJECT DATA:\n{data_context}"
         else:
             fallback_prompt = f"{system_prompt}\n\nPROJECT DATA:\n{data_context}"
 
@@ -2625,6 +2830,374 @@ def handle_save_final(ack, view, body, client):
         print(f"❌ Error in handle_save_final: {e}")
         import traceback
         traceback.print_exc()
+
+# ==========================================
+# FEATURE: ADMIN COMMANDS (Superadmin Only)
+# ==========================================
+
+def require_superadmin(func):
+    """Decorator to require superadmin (internal) access for admin commands"""
+    import functools
+    @functools.wraps(func)
+    def wrapper(ack, respond, command, body, client, *args, **kwargs):
+        ack()
+        user_id = body.get('user_id')
+        user_email = get_user_email(user_id, client)
+        
+        if not is_superadmin(user_email):
+            respond(
+                text=(
+                    "🚫 *Access Denied*\n\n"
+                    "This command is only available to internal team members (superadmin).\n"
+                    f"Your role: {get_user_role(user_email) or 'unknown'}"
+                ),
+                response_type="ephemeral"
+            )
+            return
+        
+        return func(ack, respond, command, body, client, *args, **kwargs)
+    return wrapper
+
+
+@app.command("/admin-add-channel")
+@require_superadmin
+def command_admin_add_channel(ack, respond, command, body, client):
+    """Add a channel to the channel_map
+    
+    Usage: /admin-add-channel <channel_id> <client_name> <type>
+    Example: /admin-add-channel C1234567890 Avvika external
+    """
+    args = command.get('text', '').strip().split()
+    
+    if len(args) < 3:
+        respond(
+            text=(
+                "📋 *Add Channel to Config*\n\n"
+                "*Usage:* `/admin-add-channel <channel_id> <client_name> <type>`\n\n"
+                "*Parameters:*\n"
+                "• `channel_id` - Slack channel ID (e.g., C1234567890)\n"
+                "• `client_name` - Client name (e.g., Avvika)\n"
+                "• `type` - Channel type: `internal` or `external`\n\n"
+                "*Example:*\n"
+                "`/admin-add-channel C1234567890 Avvika external`"
+            ),
+            response_type="ephemeral"
+        )
+        return
+    
+    channel_id = args[0].upper()
+    client_name = args[1]
+    channel_type = args[2].lower()
+    
+    if channel_type not in ['internal', 'external']:
+        respond(text="❌ Channel type must be 'internal' or 'external'", response_type="ephemeral")
+        return
+    
+    # Load current config
+    config = load_config()
+    
+    # Check if channel already exists
+    if channel_id in config.get("channel_map", {}):
+        existing = config["channel_map"][channel_id]
+        respond(
+            text=f"⚠️ Channel `{channel_id}` already exists:\n• Client: {existing.get('client')}\n• Type: {existing.get('type')}",
+            response_type="ephemeral"
+        )
+        return
+    
+    # Add channel
+    if "channel_map" not in config:
+        config["channel_map"] = {}
+    
+    config["channel_map"][channel_id] = {
+        "client": client_name,
+        "type": channel_type
+    }
+    
+    # Save config
+    if save_config(config):
+        respond(
+            text=f"✅ *Channel Added Successfully*\n\n• Channel ID: `{channel_id}`\n• Client: {client_name}\n• Type: {channel_type}",
+            response_type="ephemeral"
+        )
+    else:
+        respond(text="❌ Error saving config", response_type="ephemeral")
+
+
+@app.command("/admin-remove-channel")
+@require_superadmin
+def command_admin_remove_channel(ack, respond, command, body, client):
+    """Remove a channel from the channel_map
+    
+    Usage: /admin-remove-channel <channel_id>
+    """
+    channel_id = command.get('text', '').strip().upper()
+    
+    if not channel_id:
+        respond(
+            text=(
+                "📋 *Remove Channel from Config*\n\n"
+                "*Usage:* `/admin-remove-channel <channel_id>`\n\n"
+                "*Example:*\n"
+                "`/admin-remove-channel C1234567890`"
+            ),
+            response_type="ephemeral"
+        )
+        return
+    
+    config = load_config()
+    channel_map = config.get("channel_map", {})
+    
+    if channel_id not in channel_map:
+        respond(text=f"❌ Channel `{channel_id}` not found in config", response_type="ephemeral")
+        return
+    
+    # Remove channel
+    removed = channel_map.pop(channel_id)
+    config["channel_map"] = channel_map
+    
+    if save_config(config):
+        respond(
+            text=f"✅ *Channel Removed*\n\n• Channel ID: `{channel_id}`\n• Was: {removed.get('client')} ({removed.get('type')})",
+            response_type="ephemeral"
+        )
+    else:
+        respond(text="❌ Error saving config", response_type="ephemeral")
+
+
+@app.command("/admin-add-merchant")
+@require_superadmin
+def command_admin_add_merchant(ack, respond, command, body, client):
+    """Add a merchant email to the user_map
+    
+    Usage: /admin-add-merchant <email> <client_name>
+    Example: /admin-add-merchant john@example.com "Avvika"
+    """
+    args = command.get('text', '').strip().split(maxsplit=1)
+    
+    if len(args) < 2:
+        respond(
+            text=(
+                "📋 *Add Merchant User*\n\n"
+                "*Usage:* `/admin-add-merchant <email> <client_name>`\n\n"
+                "*Parameters:*\n"
+                "• `email` - Merchant's email address\n"
+                "• `client_name` - Project/Client they have access to\n\n"
+                "*Example:*\n"
+                "`/admin-add-merchant john@example.com Avvika`"
+            ),
+            response_type="ephemeral"
+        )
+        return
+    
+    email = args[0].lower()
+    client_name = args[1]
+    
+    config = load_config()
+    
+    # Ensure roles.merchants.user_map exists
+    if "roles" not in config:
+        config["roles"] = {}
+    if "merchants" not in config["roles"]:
+        config["roles"]["merchants"] = {"description": "Client specific access", "user_map": {}}
+    if "user_map" not in config["roles"]["merchants"]:
+        config["roles"]["merchants"]["user_map"] = {}
+    
+    user_map = config["roles"]["merchants"]["user_map"]
+    
+    # Check if email already exists
+    if email in [e.lower() for e in user_map.keys()]:
+        existing_client = user_map.get(email, "Unknown")
+        respond(
+            text=f"⚠️ Merchant `{email}` already exists with access to: {existing_client}",
+            response_type="ephemeral"
+        )
+        return
+    
+    # Add merchant
+    user_map[email] = client_name
+    config["roles"]["merchants"]["user_map"] = user_map
+    
+    if save_config(config):
+        respond(
+            text=f"✅ *Merchant Added*\n\n• Email: `{email}`\n• Client Access: {client_name}",
+            response_type="ephemeral"
+        )
+    else:
+        respond(text="❌ Error saving config", response_type="ephemeral")
+
+
+@app.command("/admin-remove-merchant")
+@require_superadmin
+def command_admin_remove_merchant(ack, respond, command, body, client):
+    """Remove a merchant email from the user_map
+    
+    Usage: /admin-remove-merchant <email>
+    """
+    email = command.get('text', '').strip().lower()
+    
+    if not email:
+        respond(
+            text=(
+                "📋 *Remove Merchant User*\n\n"
+                "*Usage:* `/admin-remove-merchant <email>`\n\n"
+                "*Example:*\n"
+                "`/admin-remove-merchant john@example.com`"
+            ),
+            response_type="ephemeral"
+        )
+        return
+    
+    config = load_config()
+    user_map = config.get("roles", {}).get("merchants", {}).get("user_map", {})
+    
+    # Find the email (case-insensitive)
+    found_email = None
+    for e in user_map.keys():
+        if e.lower() == email:
+            found_email = e
+            break
+    
+    if not found_email:
+        respond(text=f"❌ Merchant `{email}` not found in config", response_type="ephemeral")
+        return
+    
+    # Remove merchant
+    removed_client = user_map.pop(found_email)
+    config["roles"]["merchants"]["user_map"] = user_map
+    
+    if save_config(config):
+        respond(
+            text=f"✅ *Merchant Removed*\n\n• Email: `{found_email}`\n• Had access to: {removed_client}",
+            response_type="ephemeral"
+        )
+    else:
+        respond(text="❌ Error saving config", response_type="ephemeral")
+
+
+@app.command("/admin-list-config")
+@require_superadmin
+def command_admin_list_config(ack, respond, command, body, client):
+    """List current config summary
+    
+    Usage: /admin-list-config [channels|merchants|partners|internal]
+    """
+    filter_type = command.get('text', '').strip().lower()
+    config = load_config()
+    
+    if filter_type == 'channels':
+        channel_map = config.get("channel_map", {})
+        if not channel_map:
+            respond(text="📋 *Channels*\n\nNo channels configured.", response_type="ephemeral")
+            return
+        
+        lines = ["📋 *Configured Channels*\n"]
+        # Group by client
+        by_client = {}
+        for ch_id, info in channel_map.items():
+            client_name = info.get("client", "Unknown")
+            if client_name not in by_client:
+                by_client[client_name] = []
+            by_client[client_name].append(f"• `{ch_id}` ({info.get('type', 'unknown')})")
+        
+        for client_name, channels in sorted(by_client.items()):
+            lines.append(f"\n*{client_name}:*")
+            lines.extend(channels)
+        
+        respond(text="\n".join(lines), response_type="ephemeral")
+    
+    elif filter_type == 'merchants':
+        merchants = config.get("roles", {}).get("merchants", {}).get("user_map", {})
+        if not merchants:
+            respond(text="📋 *Merchants*\n\nNo merchants configured.", response_type="ephemeral")
+            return
+        
+        lines = ["📋 *Configured Merchants*\n"]
+        # Group by client
+        by_client = {}
+        for email, client_name in merchants.items():
+            if client_name not in by_client:
+                by_client[client_name] = []
+            by_client[client_name].append(f"• `{email}`")
+        
+        for client_name, emails in sorted(by_client.items()):
+            lines.append(f"\n*{client_name}:*")
+            lines.extend(emails)
+        
+        respond(text="\n".join(lines), response_type="ephemeral")
+    
+    elif filter_type == 'partners':
+        partners = config.get("roles", {}).get("partner", {}).get("users", [])
+        domains = config.get("roles", {}).get("partner", {}).get("domains", [])
+        
+        lines = ["📋 *Partner Users (Shopline)*\n"]
+        if domains:
+            lines.append(f"*Domains:* {', '.join(domains)}")
+        lines.append(f"\n*Users ({len(partners)}):*")
+        for email in sorted(partners):
+            lines.append(f"• `{email}`")
+        
+        respond(text="\n".join(lines), response_type="ephemeral")
+    
+    elif filter_type == 'internal':
+        internal = config.get("roles", {}).get("internal", {}).get("users", [])
+        domains = config.get("roles", {}).get("internal", {}).get("domains", [])
+        
+        lines = ["📋 *Internal Users (Superadmin)*\n"]
+        if domains:
+            lines.append(f"*Domains:* {', '.join(domains)}")
+        lines.append(f"\n*Users ({len(internal)}):*")
+        for email in sorted(internal):
+            lines.append(f"• `{email}`")
+        
+        respond(text="\n".join(lines), response_type="ephemeral")
+    
+    else:
+        # Summary view
+        channel_count = len(config.get("channel_map", {}))
+        merchant_count = len(config.get("roles", {}).get("merchants", {}).get("user_map", {}))
+        partner_count = len(config.get("roles", {}).get("partner", {}).get("users", []))
+        internal_count = len(config.get("roles", {}).get("internal", {}).get("users", []))
+        
+        respond(
+            text=(
+                "📋 *Config Summary*\n\n"
+                f"• *Channels:* {channel_count}\n"
+                f"• *Merchants:* {merchant_count}\n"
+                f"• *Partners:* {partner_count}\n"
+                f"• *Internal:* {internal_count}\n\n"
+                "*Filter options:*\n"
+                "`/admin-list-config channels` - Show all channels\n"
+                "`/admin-list-config merchants` - Show all merchants\n"
+                "`/admin-list-config partners` - Show partner users\n"
+                "`/admin-list-config internal` - Show internal users"
+            ),
+            response_type="ephemeral"
+        )
+
+
+@app.command("/admin-reload-config")
+@require_superadmin
+def command_admin_reload_config(ack, respond, command, body, client):
+    """Reload config from file/environment"""
+    reload_config()
+    
+    # Get counts after reload
+    channel_count = len(CHANNEL_MAP)
+    internal_count = len(AUTHORIZED_USERS)
+    external_count = len(EXTERNAL_AUTHORIZED_USERS)
+    
+    respond(
+        text=(
+            "✅ *Config Reloaded*\n\n"
+            f"• Channels: {channel_count}\n"
+            f"• Internal users: {internal_count}\n"
+            f"• External users: {external_count}"
+        ),
+        response_type="ephemeral"
+    )
+
+
 
 # --- FLASK ROUTES ---
 @flask_app.route("/slack/events", methods=["POST"])
