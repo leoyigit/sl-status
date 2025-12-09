@@ -352,7 +352,7 @@ def setup_openai_assistant():
         if current_vs_id:
             try:
                 # Prove access to the vector store
-                ai_client.beta.vector_stores.retrieve(current_vs_id)
+                ai_client.vector_stores.retrieve(current_vs_id)
                 print(f"✅ Found existing vector store: {current_vs_id}")
             except Exception:
                 print(f"⚠️ Vector Store {current_vs_id} not found. Creating new one...")
@@ -360,7 +360,7 @@ def setup_openai_assistant():
         
         if not current_vs_id:
             try:
-                vs = ai_client.beta.vector_stores.create(name="Projects Knowledge Base")
+                vs = ai_client.vector_stores.create(name="Projects Knowledge Base")
                 current_vs_id = vs.id
                 print(f"✅ Created new vector store: {current_vs_id}")
                 # Update global immediately
