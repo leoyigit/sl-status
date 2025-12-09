@@ -606,7 +606,7 @@ def sync_slack_messages_to_knowledge_base():
         print("🧹 Cleaning up old log files from Vector Store...")
         try:
             # List files in vector store
-            files_in_vs = ai_client.beta.vector_stores.files.list(vector_store_id=vector_store_id)
+            files_in_vs = ai_client.vector_stores.files.list(vector_store_id=vector_store_id)
             for vs_file in files_in_vs:
                 # We can't see the filename easily from VS link alone in some SDK versions
                 # so we check the actual file object if possible, or just rely on IDs
@@ -642,7 +642,7 @@ def sync_slack_messages_to_knowledge_base():
             file = ai_client.files.create(file=f, purpose="assistants")
         
         # Add to vector store
-        ai_client.beta.vector_stores.files.create(
+        ai_client.vector_stores.files.create(
             vector_store_id=vector_store_id,
             file_id=file.id
         )
@@ -691,17 +691,10 @@ def sync_data_to_knowledge_base():
         
         # Add to vector store
         try:
-            if hasattr(ai_client.beta, 'vector_stores'):
-                ai_client.beta.vector_stores.files.create(
-                    vector_store_id=vector_store_id,
-                    file_id=file.id
-                )
-            else:
-                # Fallback for different SDK versions
-                ai_client.vector_stores.files.create(
-                    vector_store_id=vector_store_id,
-                    file_id=file.id
-                )
+            ai_client.vector_stores.files.create(
+                vector_store_id=vector_store_id,
+                file_id=file.id
+            )
         except Exception as e:
             print(f"❌ Error adding file to vector store: {e}")
             raise
