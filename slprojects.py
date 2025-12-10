@@ -779,14 +779,35 @@ def sync_slack_messages_to_knowledge_base():
         if not all_messages:
             return "⚠️ No messages found in any channel (Bot might not be invited to channels)."
         
-        # --- 2. Format File ---
-        messages_text = "SLACK LOGS AND EMAIL INBOX DUMP:\n"
+        # --- 2. Sort by NEWEST first so AI sees recent content ---
+        all_messages.sort(key=lambda x: float(x.get('timestamp', 0)), reverse=True)
+        
+        # --- 3. Format File ---
+        messages_text = "SLACK LOGS AND EMAIL INBOX DUMP\n"
+        messages_text += "=" * 50 + "\n"
         messages_text += f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+        messages_text += "IMPORTANT: Messages are sorted NEWEST FIRST. The most recent messages are at the TOP.\n"
+        messages_text += "When asked about 'latest' or 'recent', prioritize messages near the TOP of this file.\n"
         messages_text += "=" * 50 + "\n\n"
+        
+        import time as time_module
+        current_time = time_module.time()
         
         for msg in all_messages:
             try:
-                date_str = datetime.fromtimestamp(float(msg['timestamp'])).strftime('%Y-%m-%d %H:%M')
+                msg_timestamp = float(msg['timestamp'])
+                date_str = datetime.fromtimestamp(msg_timestamp).strftime('%Y-%m-%d %H:%M')
+                
+                # Add relative time
+                seconds_ago = current_time - msg_timestamp
+                if seconds_ago < 3600:
+                    relative = f"({int(seconds_ago / 60)} min ago)"
+                elif seconds_ago < 86400:
+                    relative = f"({int(seconds_ago / 3600)} hours ago)"
+                else:
+                    relative = f"({int(seconds_ago / 86400)} days ago)"
+                
+                date_str = f"{date_str} {relative}"
             except:
                 date_str = "Unknown"
             
