@@ -1859,7 +1859,22 @@ def process_ask_background(respond, query_text, channel_id, user_id, client):
         # ENHANCEMENT: If query mentions email/mailbox, enhance the query to trigger file_search
         enhanced_query = query_text
         query_lower = query_text.lower()
-        if any(keyword in query_lower for keyword in ['email', 'mailbox', 'mail', 'message', 'communication', 'said', 'wrote']):
+        
+        # Check for recency keywords
+        recency_keywords = ['latest', 'recent', 'last', 'newest', 'today', 'yesterday', 'this week']
+        wants_recent = any(keyword in query_lower for keyword in recency_keywords)
+        
+        if wants_recent:
+            # Add strong instruction to check dates
+            enhanced_query = (
+                f"{query_text}\n\n"
+                f"CRITICAL: The user is asking about the MOST RECENT information. "
+                f"You MUST look at the dates/timestamps in the results. "
+                f"Messages in the logs show dates like '2025-12-10 18:57 (3 hours ago)'. "
+                f"Return ONLY the content with the NEWEST date - ignore older entries. "
+                f"If you find multiple results, compare the dates and return the one from the most recent date."
+            )
+        elif any(keyword in query_lower for keyword in ['email', 'mailbox', 'mail', 'message', 'communication', 'said', 'wrote']):
             # Add explicit instruction to search emails
             enhanced_query = (
                 f"{query_text}\n\n"
