@@ -2964,8 +2964,8 @@ def handle_save_final(ack, view, body, client):
                 
                 # Show change summary if available
                 if change_summary and change_summary.get("changed"):
-                changes_text = []
-                for field, change in change_summary["changes"].items():
+                    changes_text = []
+                    for field, change in change_summary["changes"].items():
                     changes_text.append(f"• *{field.replace('_', ' ').title()}:* `{change['old']}` → `{change['new']}`")
                 
                 # Try to send a response (if we can get channel context)
