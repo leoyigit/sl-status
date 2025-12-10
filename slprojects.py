@@ -331,7 +331,12 @@ def get_system_prompt(user_email, client_name=None):
         "- Keep responses concise and scannable\n"
         "- Use emojis sparingly for visual breaks (✅ ❌ 📌 🔴 🟢)\n"
         "- Do NOT use ### or #### for headers - use *Bold Title* instead\n"
-        "- Do NOT use [text](url) format - just paste the URL directly"
+        "- Do NOT use [text](url) format - just paste the URL directly\n\n"
+        "RESPONSE STRUCTURE:\n"
+        "When providing status reports or answering complex questions, split your answer into two sections:\n"
+        "1. *Structured Data by PMs* (from projects.json/structured data)\n"
+        "2. *Channels* (from Slack/Email logs)\n"
+        "If a section has no relevant info, you can omit it."
     )
     
     # Combine with rules
@@ -650,14 +655,25 @@ def setup_openai_assistant():
         # Raise exception to caller so they know WHY it failed
         raise e
 
-def fetch_channel_messages(channel_id, limit=100):
-    """Fetch recent messages from a Slack channel (Robust Version)"""
+def fetch_channel_messages(channel_id, limit=200, days_back=7):
+    """Fetch recent messages from a Slack channel (Robust Version)
+    
+    Args:
+        channel_id: Slack channel ID
+        limit: Max messages to fetch (default 200)
+        days_back: Only fetch messages from last N days (default 7)
+    """
     try:
         # We use a try/except block specifically for the API call
         try:
+            # Calculate oldest timestamp (default 7 days ago)
+            import time as time_mod
+            oldest_ts = time_mod.time() - (days_back * 24 * 60 * 60)
+            
             result = app.client.conversations_history(
                 channel=channel_id,
-                limit=limit
+                limit=limit,
+                oldest=str(oldest_ts)  # Only fetch messages newer than this
             )
         except Exception as e:
             # Check if it's a "not_in_channel" error
@@ -687,6 +703,13 @@ def fetch_channel_messages(channel_id, limit=100):
             text = msg.get("text", "")
             if not text and "files" in msg:
                 text = f"[File shared]"
+            
+            # Strip @ mentions to prevent AI from triggering notifications
+            # Convert <@U123ABC> to just the name or remove
+            import re
+            text = re.sub(r'<@[A-Z0-9]+>', lambda m: get_user_name(m.group(0)[2:-1]), text)
+            # Also remove @channel and @here
+            text = text.replace("<!channel>", "channel").replace("<!here>", "here")
             
             # Reduce threshold to capture short status updates
             if text and len(text.strip()) > 2:
@@ -750,7 +773,8 @@ def sync_slack_messages_to_knowledge_base():
             client_name = ch["client"]
             
             # Fetch messages (Now safe from crashing)
-            messages = fetch_channel_messages(channel_id, limit=200)
+            # Fetch last 30 days as requested by user
+            messages = fetch_channel_messages(channel_id, limit=300, days_back=30)
             
             # Track per-channel stats
             if client_name not in channel_stats:
