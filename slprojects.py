@@ -203,9 +203,14 @@ def save_db(data):
     headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
     payload = {"files": {GIST_FILENAME: {"content": json.dumps(data, indent=2)}}}
     try:
-        requests.patch(f"https://api.github.com/gists/{GIST_ID}", json=payload, headers=headers)
+        response = requests.patch(f"https://api.github.com/gists/{GIST_ID}", json=payload, headers=headers)
+        if response.status_code not in [200, 201]:
+            print(f"❌ Error saving to Gist: {response.status_code} - {response.text}")
+            raise Exception(f"Gist save failed: {response.status_code}")
+        return True
     except Exception as e:
         print(f"❌ Error saving: {e}")
+        raise e
 
 # --- HELPER: CONTEXT SECURITY ---
 def get_request_context(channel_id):
@@ -969,7 +974,7 @@ def sync_slack_messages_to_knowledge_base():
         traceback.print_exc()
         return f"❌ Critical Sync Error: {str(e)[:100]}"
 
-def sync_data_to_knowledge_base():
+def sync_data_to_knowledge_base(projects=None):
     """Sync project data to knowledge base"""
     if not ai_client:
         return
@@ -980,7 +985,8 @@ def sync_data_to_knowledge_base():
     
     try:
         # Sync project data
-        projects = load_db()
+        if projects is None:
+            projects = load_db()
         projects_json = json.dumps(projects, indent=2)
         
         # Create a temporary file
@@ -2951,12 +2957,13 @@ def handle_save_final(ack, view, body, client):
                 break
         
         if found:
-            save_db(projects)
-            # Sync to knowledge base
-            sync_data_to_knowledge_base()
-            
-            # Show change summary if available
-            if change_summary and change_summary.get("changed"):
+            try:
+                save_db(projects)
+                # Sync to knowledge base
+                sync_data_to_knowledge_base(projects)
+                
+                # Show change summary if available
+                if change_summary and change_summary.get("changed"):
                 changes_text = []
                 for field, change in change_summary["changes"].items():
                     changes_text.append(f"• *{field.replace('_', ' ').title()}:* `{change['old']}` → `{change['new']}`")
@@ -2968,6 +2975,11 @@ def handle_save_final(ack, view, body, client):
                     print(f"   Changes: {', '.join(change_summary['changes'].keys())}")
                 except:
                     pass
+            except Exception as e:
+                print(f"❌ Failed to save changes: {e}")
+                # We could send a message to user here if we had the context, 
+                # but for modal submissions, raising an exception usually triggers the error view
+                raise e
         else:
             print(f"⚠️ Warning: Project '{client_name}' not found in database")
     except KeyError as e:
