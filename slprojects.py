@@ -735,10 +735,13 @@ def sync_slack_messages_to_knowledge_base():
         # Add Mailbox Channel
         if MAILBOX_CHANNEL_ID:
             channels_to_sync.append({
-                "id": MAILBOX_CHANNEL_ID, "client": "MAILBOX_INBOX", "role": "email_source"
+                "id": MAILBOX_CHANNEL_ID, "client": "MAILBOX_INBOX", "type": "email_source"
             })
 
         print(f"📥 Starting sync for {len(channels_to_sync)} channels...")
+        
+        # Track per-channel stats
+        channel_stats = {}
 
         latest_timestamp = 0  # Track the most recent message
         
@@ -749,7 +752,13 @@ def sync_slack_messages_to_knowledge_base():
             # Fetch messages (Now safe from crashing)
             messages = fetch_channel_messages(channel_id, limit=200)
             
+            # Track per-channel stats
+            if client_name not in channel_stats:
+                channel_stats[client_name] = 0
+            
             if messages:
+                channel_stats[client_name] += len(messages)
+                
                 # Update stats
                 if client_name == "MAILBOX_INBOX":
                     stats["mailbox"] += len(messages)
@@ -775,6 +784,11 @@ def sync_slack_messages_to_knowledge_base():
                         "timestamp": msg["ts"],
                         "user": user_name
                     })
+        
+        # Log channel stats
+        print(f"📊 Per-channel message counts:")
+        for client, count in sorted(channel_stats.items()):
+            print(f"   - {client}: {count} messages")
         
         if not all_messages:
             return "⚠️ No messages found in any channel (Bot might not be invited to channels)."
@@ -911,12 +925,17 @@ def sync_slack_messages_to_knowledge_base():
             except:
                 latest_msg_ago = datetime.fromtimestamp(latest_timestamp).strftime('%Y-%m-%d %H:%M')
         
+        # Build channel breakdown (top 5 by count)
+        sorted_channels = sorted(channel_stats.items(), key=lambda x: x[1], reverse=True)[:5]
+        channel_breakdown = "\n".join([f"   • {c}: {n}" for c, n in sorted_channels if n > 0])
+        
         return (
             f"✅ *Sync Complete!*\n"
             f"📧 Emails (Mailbox): {stats['mailbox']}\n"
             f"💬 Slack Messages: {stats['channels']}\n"
             f"📚 Total Items: {len(all_messages)}\n"
             f"🕐 Latest Message: {latest_msg_ago}\n"
+            f"📊 *Top Channels:*\n{channel_breakdown}\n"
             f"🆔 Vector Store: `{vector_store_id}`"
         )
         
