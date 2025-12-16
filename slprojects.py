@@ -2420,8 +2420,7 @@ def handle_edit_client_submission(ack, body, view, client):
         else:
             raise Exception("Failed to save new project file")
 
-        else:
-            ack(response_action="errors", errors={"select_client_block": "Client not found"})
+
     except (KeyError, TypeError) as e:
         print(f"❌ Error editing client: {e}")
         ack(response_action="errors", errors={"new_name_block": "Error processing request"})
