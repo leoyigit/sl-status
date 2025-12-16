@@ -1385,7 +1385,7 @@ def process_email_for_status_update(text, channel_id=None, event_ts=None, user_i
         if updated:
             save_db(projects)
             # Sync to knowledge base so AI memory is up to date
-            sync_data_to_knowledge_base()
+            sync_all_data_to_openai()
             return result
         else:
             print(f"⚠️ Client '{client_name}' not found in database")
@@ -1526,7 +1526,7 @@ def scheduled_daily_report():
         app.client.chat_postMessage(channel=CHANNEL_ID_REPORT, blocks=blocks, text="Daily Report")
         
         # Sync to knowledge base after report
-        sync_data_to_knowledge_base()
+        sync_all_data_to_openai()
         print("✅ Daily report sent and knowledge base synced")
         
     except Exception as e:
@@ -2418,7 +2418,7 @@ def command_sync_knowledge(ack, client, body):
     
     try:
         # 1. Always sync projects.json (Structured Data)
-        sync_data_to_knowledge_base()
+        sync_all_data_to_openai()
         msg = "✅ `projects.json` (Structured Data) updated.\n"
         
         # 2. Sync Slack/Email Logs (Unstructured Data)
@@ -3269,7 +3269,7 @@ def initialize_app():
         if assistant_id:
             print(f"✅ OpenAI Assistant ready: {assistant_id}")
             # Initial sync
-            sync_data_to_knowledge_base()
+            sync_all_data_to_openai()
         else:
             print("⚠️ OpenAI Assistant setup failed or not configured")
     else:
