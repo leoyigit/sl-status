@@ -36,8 +36,11 @@ ai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")  # Options: gpt-3.5-turbo, gpt-4o-mini, gpt-4-turbo
 
 # OpenAI Assistant Config (for knowledge base)
+# OpenAI Assistant Config (for knowledge base)
 ASSISTANT_ID = os.environ.get("OPENAI_ASSISTANT_ID")  # Will be created if not exists
-VECTOR_STORE_ID = os.environ.get("OPENAI_VECTOR_STORE_ID")  # Will be created if not exists
+# Dual Vector Store IDs
+VS_INTERNAL_ID = os.environ.get("OPENAI_VS_INTERNAL_ID")
+VS_EXTERNAL_ID = os.environ.get("OPENAI_VS_EXTERNAL_ID")
 
 # --- CONFIGURATION LOADING ---
 def load_config():
@@ -529,97 +532,58 @@ def setup_openai_assistant():
                             "- When searching for a specific client's emails, search for the client name in the Content section\n"
                             "- The full email body/content is in the '📝 EMAIL CONTENT:' or '📝 Content:' section\n\n"
                             "SEARCH STRATEGY:\n"
-                            "1. If asked about emails, IMMEDIATELY use file_search on 'Slack Logs'\n"
-                            "2. Search for the client name mentioned in the question\n"
-                            "3. Return the FULL email content from the '📝 EMAIL CONTENT:' section\n"
-                            "4. If multiple emails exist, show the most recent ones first\n\n"
-                            "RESPONSE FORMAT:\n"
-                            "- Use Slack-friendly formatting (*bold*, • lists)\n"
-                            "- When showing email content, quote it clearly\n"
-                            "- Include the date/timestamp from the log entry\n"
-                            "- No Markdown headers (#)\n\n"
-                            "EXAMPLE:\n"
-                            "User: 'What did Mimosa say in their email?'\n"
-                            "You: Use file_search → Find entries with 'Mimosa' and 'MAILBOX_INBOX' → Return full email content"
-                        )
-                    )
-                    print("✅ Updated assistant instructions for email search")
-                except Exception as update_error:
-                    print(f"⚠️ Could not update assistant instructions: {update_error}")
-                
-                return assistant.id, vector_store_id
             except Exception:
                 print(f"⚠️ Assistant {ASSISTANT_ID} not found. Creating new one...")
         
-        # Create vector store for knowledge base
-        # Vector stores are accessed through beta.vector_stores in OpenAI SDK
-        try:
-            # Check if vector_stores exists in beta
-            if hasattr(ai_client.beta, 'vector_stores'):
-                vector_store = ai_client.beta.vector_stores.create(
-                    name="Projects Knowledge Base"
-                )
-            else:
-                # Try direct access (for newer SDK versions)
-                vector_store = ai_client.vector_stores.create(
-                    name="Projects Knowledge Base"
-                )
-        except Exception as e:
-            print(f"❌ Error creating vector store: {e}")
-            print("⚠️ Vector stores may not be available. Check your OpenAI SDK version.")
-            return None, None
+        # 2. Retrieve or Create Internal Vector Store
+        if VS_INTERNAL_ID:
+            try:
+                vs_internal = ai_client.beta.vector_stores.retrieve(VS_INTERNAL_ID)
+            except Exception:
+                print(f"⚠️ Internal VS {VS_INTERNAL_ID} not found. Creating new...")
         
-        vector_store_id = vector_store.id
-        print(f"✅ Created vector store: {vector_store_id}")
+        if not vs_internal:
+            vs_internal = ai_client.beta.vector_stores.create(name="Internal Knowledge Base (Master)")
+            print(f"✅ Created Internal VS: {vs_internal.id}")
+
+        # 3. Retrieve or Create External Vector Store
+        if VS_EXTERNAL_ID:
+            try:
+                vs_external = ai_client.beta.vector_stores.retrieve(VS_EXTERNAL_ID)
+            except Exception:
+                print(f"⚠️ External VS {VS_EXTERNAL_ID} not found. Creating new...")
         
-# Create assistant with SLACK-SPECIFIC instructions
-        assistant = ai_client.beta.assistants.create(
-            name="Shopline Project Assistant",
-            instructions=(
-                "You are a Project Operations Assistant with access to project data and email communications.\n\n"
-                "DATA SOURCES:\n"
-                "1. 'projects.json' - Contains structured project status, blockers, and metadata\n"
-                "2. 'Slack Logs' file - Contains ALL emails from the mailbox channel and Slack chat messages\n\n"
-                "CRITICAL SEARCH RULES:\n"
-                "- ALWAYS use file_search tool when user asks about:\n"
-                "  * Emails, mailbox, email content, email body, communications\n"
-                "  * Specific client names (e.g., 'Mimosa', 'Avvika') combined with 'email'\n"
-                "  * 'What did [client] say in their email?'\n"
-                "  * 'Read the email about [client]'\n"
-                "  * Any question about email content or messages\n\n"
-                "EMAIL IDENTIFICATION IN LOGS:\n"
-                "- Emails are marked with: '📂 Source: MAILBOX_INBOX (Email)'\n"
-                "- Look for entries where type is 'Email' and client is 'MAILBOX_INBOX'\n"
-                "- When searching for a specific client's emails, search for the client name in the Content section\n"
-                "- The full email body/content is in the '📝 Content:' section\n\n"
-                "SEARCH STRATEGY:\n"
-                "1. If asked about emails, IMMEDIATELY use file_search on 'Slack Logs'\n"
-                "2. Search for the client name mentioned in the question\n"
-                "3. Return the FULL email content from the '📝 EMAIL CONTENT:' section\n"
-                "4. If multiple emails exist, show the most recent ones first\n\n"
-                "RESPONSE FORMAT:\n"
-                "- Use Slack-friendly formatting (*bold*, • lists)\n"
-                "- When showing email content, quote it clearly\n"
-                "- Include the date/timestamp from the log entry\n"
-                "- No Markdown headers (#)\n\n"
-                "EXAMPLE:\n"
-                "User: 'What did Mimosa say in their email?'\n"
-                "You: Use file_search → Find entries with 'Mimosa' and 'MAILBOX_INBOX' → Return full email content"
-            ),
-            model=OPENAI_MODEL,
-            tools=[{"type": "file_search"}],
-            tool_resources={
-                "file_search": {
-                    "vector_store_ids": [vector_store_id]
+        if not vs_external:
+            vs_external = ai_client.beta.vector_stores.create(name="External Knowledge Base (Public)")
+            print(f"✅ Created External VS: {vs_external.id}")
+
+        # 4. Create Assistant (if needed) linked to Internal VS by default
+        if not assistant:
+            assistant = ai_client.beta.assistants.create(
+                name="Shopline Project Assistant",
+                instructions=(
+                    "You are a Project Operations Assistant with access to project data and email communications.\n"
+                    "Your knowledge base is strictly segmented based on the user's role.\n"
+                    "Always use file_search to answer questions about projects, emails, or logs."
+                ),
+                model=OPENAI_MODEL,
+                tools=[{"type": "file_search"}],
+                tool_resources={
+                    "file_search": {
+                        "vector_store_ids": [vs_internal.id]
+                    }
                 }
-            }
-        )
-        print(f"✅ Created assistant: {assistant.id}")
-        print(f"⚠️ IMPORTANT: Set OPENAI_ASSISTANT_ID={assistant.id} and OPENAI_VECTOR_STORE_ID={vector_store_id} as environment variables")
-        return assistant.id, vector_store_id
+            )
+            print(f"✅ Created assistant: {assistant.id}")
+            print(f"⚠️ IMPORTANT: Update your Environment Variables:")
+            print(f"   OPENAI_ASSISTANT_ID={assistant.id}")
+            print(f"   OPENAI_VS_INTERNAL_ID={vs_internal.id}")
+            print(f"   OPENAI_VS_EXTERNAL_ID={vs_external.id}")
+            
+        return assistant.id, vs_internal.id, vs_external.id
     except Exception as e:
         print(f"❌ Error setting up assistant: {e}")
-        return None, None
+        return None, None, None
 
 def fetch_channel_messages(channel_id, limit=100):
     """Fetch recent messages from a Slack channel (Robust Version)"""
@@ -650,9 +614,14 @@ def fetch_channel_messages(channel_id, limit=100):
         all_messages = result.get("messages", [])
         messages = []
         
+        # Debug counters
+        skipped_subtype = 0
+        skipped_length = 0
+        
         for msg in all_messages:
             # Skip bot messages and system messages
             if msg.get("subtype") in ["bot_message", "channel_join", "channel_leave", "channel_topic"]:
+                skipped_subtype += 1
                 continue
             
             text = msg.get("text", "")
@@ -667,7 +636,10 @@ def fetch_channel_messages(channel_id, limit=100):
                     "ts": msg.get("ts", ""),
                     "channel": channel_id
                 })
+            else:
+                skipped_length += 1
         
+        print(f"🔎 Channel {channel_id}: Fetched {len(all_messages)}, Kept {len(messages)} (Skipped: {skipped_subtype} system, {skipped_length} short)")
         return messages
 
     except Exception as e:
@@ -676,129 +648,153 @@ def fetch_channel_messages(channel_id, limit=100):
         return []
 
 def sync_slack_messages_to_knowledge_base():
-    """Fetch and sync messages with detailed logging"""
+    """Fetch and sync messages with security segregation (Individual Client files)"""
     if not ai_client:
         return "❌ AI Client not configured"
     
-    # Get IDs (and ensure they exist)
-    assistant_id, vector_store_id = setup_openai_assistant()
-    if not assistant_id or not vector_store_id:
+    # Get IDs
+    conv_result = setup_openai_assistant()
+    if not conv_result or conv_result[0] is None:
         return "❌ Assistant/Vector Store setup failed"
+        
+    _, vs_internal_id, vs_external_id = conv_result
     
-    try:
-        all_messages = []
-        stats = {"mailbox": 0, "channels": 0}
+    if not vs_internal_id or not vs_external_id:
+         return "❌ Failed to retrieve both Vector Store IDs"
 
-        # --- 1. Fetch Messages ---
+    try:
+        stats = {"mailbox": 0, "channels": 0}
+        
+        # --- 1. Fetch & Sort Messages by (Client, Role) ---
+        # Structure: grouped_data[(client_name, role)] = [messages]
+        grouped_data = {}
+        
         channels_to_sync = []
         
         # Add project channels
         for cid, ctx in CHANNEL_MAP.items():
-            if ctx.get("role") in ["internal", "external"]:
+            role = str(ctx.get("role", "")).lower()
+            if role in ["internal", "external"]:
                 channels_to_sync.append({
-                    "id": cid, "client": ctx.get("client", "Unknown"), "role": ctx.get("role", "internal")
+                    "id": cid, 
+                    "client": ctx.get("client", "Unknown"), 
+                    "role": role  # 'internal' or 'external'
                 })
         
-        # Add Mailbox Channel
+        # Add Mailbox Channel (Always Internal)
         if MAILBOX_CHANNEL_ID:
             channels_to_sync.append({
-                "id": MAILBOX_CHANNEL_ID, "client": "MAILBOX_INBOX", "role": "email_source"
+                "id": MAILBOX_CHANNEL_ID, 
+                "client": "MAILBOX_INBOX", 
+                "role": "internal"
             })
 
-        print(f"📥 Starting sync for {len(channels_to_sync)} channels...")
+        print(f"📥 Starting segregated sync for {len(channels_to_sync)} channels...")
 
         for ch in channels_to_sync:
             channel_id = ch["id"]
             client_name = ch["client"]
+            role = ch["role"]
             
-            # Fetch messages (Now safe from crashing)
             messages = fetch_channel_messages(channel_id, limit=50)
             
             if messages:
+                key = (client_name, role)
+                if key not in grouped_data:
+                    grouped_data[key] = []
+                    
+                grouped_data[key].extend(messages)
+                
                 # Update stats
                 if client_name == "MAILBOX_INBOX":
                     stats["mailbox"] += len(messages)
                 else:
                     stats["channels"] += len(messages)
-                
-                for msg in messages:
-                    all_messages.append({
-                        "client": client_name,
-                        "type": "Email" if client_name == "MAILBOX_INBOX" else "Slack Chat",
-                        "content": msg["text"],
-                        "timestamp": msg["ts"],
-                        "user": msg["user"]
-                    })
         
-        if not all_messages:
-            return "⚠️ No messages found in any channel (Bot might not be invited)."
-        
-        # --- 2. Format File ---
-        messages_text = "SLACK LOGS AND EMAIL INBOX DUMP:\n"
-        messages_text += f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
-        messages_text += "=" * 50 + "\n\n"
-        
-        for msg in all_messages:
-            try:
-                date_str = datetime.fromtimestamp(float(msg['timestamp'])).strftime('%Y-%m-%d %H:%M')
-            except:
-                date_str = "Unknown"
-            
-            # Enhanced formatting for better searchability
-            client_name = msg['client']
-            msg_type = msg['type']
-            content = msg['content']
-            
-            # For emails, add client name extraction for better search
-            if msg_type == "Email":
-                # Try to extract client name from email content for indexing
-                messages_text += f"📅 Date: {date_str}\n"
-                messages_text += f"📂 Source: {client_name} ({msg_type})\n"
-                messages_text += f"📧 EMAIL MESSAGE - Searchable by client name in content\n"
-                messages_text += f"👤 User: {msg['user']}\n"
-                messages_text += f"📝 EMAIL CONTENT:\n{content}\n"
-                messages_text += f"🔍 Keywords: {client_name}, email, mailbox, communication\n"
-            else:
-                messages_text += f"📅 Date: {date_str}\n"
-                messages_text += f"📂 Source: {client_name} ({msg_type})\n"
-                messages_text += f"👤 User: {msg['user']}\n"
-                messages_text += f"📝 Content:\n{content}\n"
-            
-            messages_text += "-" * 50 + "\n\n"
-        
-        # --- 3. Upload to OpenAI ---
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
-            f.write(messages_text)
-            temp_path = f.name
-        
-        with open(temp_path, 'rb') as f:
-            file = ai_client.files.create(file=f, purpose="assistants")
-        
-        # Add to vector store (Handling API variations)
-        try:
-            if hasattr(ai_client, 'beta') and hasattr(ai_client.beta, 'vector_stores'):
-                ai_client.beta.vector_stores.files.create(
-                    vector_store_id=vector_store_id,
-                    file_id=file.id
-                )
-            else:
-                # Fallback for older libraries (though you should update requirements.txt)
-                ai_client.vector_stores.files.create(
-                    vector_store_id=vector_store_id,
-                    file_id=file.id
-                )
-        except Exception as e:
-            print(f"❌ OpenAI Vector Store Error: {e}")
-            return f"❌ OpenAI Library Error: {str(e)} (Check requirements.txt)"
+        if not grouped_data:
+            return "⚠️ No messages found in any channel."
 
-        os.unlink(temp_path)
+        # --- 2. Generate Files & Upload ---
+        import tempfile
+        uploaded_internal_ids = []
+        uploaded_external_ids = []
         
+        # Iterate over groups and create files
+        for (client_name, role), msgs in grouped_data.items():
+            # Format content
+            file_content = f"LOGS: {client_name} ({role.upper()})\n"
+            file_content += f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+            file_content += "=" * 40 + "\n\n"
+            
+            for msg in msgs:
+                try:
+                    date_str = datetime.fromtimestamp(float(msg.get('ts', 0))).strftime('%Y-%m-%d %H:%M')
+                except:
+                    date_str = "Unknown"
+                
+                user = msg.get('user', 'unknown')
+                content = msg.get('text', '')
+                
+                file_content += f"📅 {date_str} | 👤 {user}\n"
+                file_content += f"📝 {content}\n"
+                file_content += "-" * 20 + "\n"
+            
+            # Create temp file
+            safe_client = "".join([c for c in client_name if c.isalnum() or c in (' ', '_', '-')]).strip()
+            filename = f"{safe_client}_{role}.txt"
+            
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
+                f.write(file_content)
+                temp_path = f.name
+            
+            # Upload to OpenAI
+            try:
+                with open(temp_path, 'rb') as f:
+                    file_obj = ai_client.files.create(file=f, purpose="assistants")
+                
+                # Assign to lists based on policy
+                # Internal VS gets EVERYTHING
+                uploaded_internal_ids.append(file_obj.id)
+                
+                # External VS gets ONLY External Logs (NOT Mailbox, NOT Internal)
+                if role == "external" and client_name != "MAILBOX_INBOX":
+                    uploaded_external_ids.append(file_obj.id)
+                    
+            except Exception as e:
+                print(f"❌ Error uploading {filename}: {e}")
+            finally:
+                os.unlink(temp_path)
+        
+        # --- 3. Update Vector Stores ---
+        # Note: This approach ADDS files. Ideally, we should clear old files or use file replacement.
+        # For this implementation, we will perform an ADDITION batch. 
+        # (A production version should prune old files, but simpler is safer for now).
+        
+        if uploaded_internal_ids:
+            try:
+                ai_client.beta.vector_stores.file_batches.create(
+                    vector_store_id=vs_internal_id,
+                    file_ids=uploaded_internal_ids
+                )
+                print(f"✅ Added {len(uploaded_internal_ids)} files to Internal VS")
+            except Exception as e:
+                print(f"❌ Error updating Internal VS: {e}")
+
+        if uploaded_external_ids:
+            try:
+                ai_client.beta.vector_stores.file_batches.create(
+                    vector_store_id=vs_external_id,
+                    file_ids=uploaded_external_ids
+                )
+                print(f"✅ Added {len(uploaded_external_ids)} files to External VS")
+            except Exception as e:
+                print(f"❌ Error updating External VS: {e}")
+
         return (
-            f"✅ *Sync Complete!*\n"
-            f"📧 Emails (Mailbox): {stats['mailbox']}\n"
-            f"💬 Slack Messages: {stats['channels']}\n"
-            f"📚 Total Items: {len(all_messages)}"
+            f"✅ *Sync Complete (Segregated Mode)*\n"
+            f"🔒 Internal Brain: +{len(uploaded_internal_ids)} files\n"
+            f"🌍 External Brain: +{len(uploaded_external_ids)} files\n"
+            f"📧 Total Mails: {stats['mailbox']} | 💬 Total Chats: {stats['channels']}"
         )
         
     except Exception as e:
@@ -810,12 +806,71 @@ def sync_slack_messages_to_knowledge_base():
 
 def sync_data_to_knowledge_base():
     """Sync project data to knowledge base - Uploads individual project files"""
-    if not ai_client:
-        return
+    if not ai_client: return
     
-    assistant_id, vector_store_id = setup_openai_assistant()
-    if not assistant_id or not vector_store_id:
-        return
+    # Get all IDs
+    res = setup_openai_assistant()
+    if not res: return
+    _, vs_internal_id, vs_external_id = res
+    
+    if not vs_internal_id or not vs_external_id: return
+    
+    try:
+        projects = load_all_projects()
+        
+        # Track uploaded file IDs
+        internal_ids = []
+        external_ids = []
+        
+        # Temporary file streams
+        temp_paths = []
+        
+        import tempfile
+        
+        for p in projects:
+            client = p.get("client", "Unknown")
+            
+            # Determine visibility based on logic? 
+            # For now, Projects.json data is considered INTERNAL primarily, 
+            # but usually clients want to see their OWN project status.
+            # To be safe, we might put everything in internal, or filter.
+            # Let's put ALL projects in Internal, and NO projects in External (unless specified).
+            # Actually, per user request: "one internal one external".
+            # This implies the External Gist/Knowledge should contain a redacted or specific version.
+            # For simplicity in this step, we will add Project Data to INTERNAL only to be safe, 
+            # unless we add specific "external visibility" logic later.
+            
+            tf = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, prefix=f"{client}_")
+            tf.write(json.dumps(p, indent=2))
+            tf.close()
+            temp_paths.append(tf.name)
+            
+            try:
+                with open(tf.name, 'rb') as f:
+                    f_obj = ai_client.files.create(file=f, purpose="assistants")
+                    internal_ids.append(f_obj.id)
+            except:
+                pass
+
+        # Update Internal VS
+        if internal_ids:
+            try:
+                ai_client.beta.vector_stores.file_batches.create(
+                    vector_store_id=vs_internal_id,
+                    file_ids=internal_ids
+                )
+                print(f"✅ Synced {len(internal_ids)} project files to Internal Knowledge Base")
+            except Exception as e:
+                print(f"❌ Error updating Internal VS: {e}")
+        
+        # Cleanup
+        for path in temp_paths:
+            try:
+                os.unlink(path)
+            except: pass
+            
+    except Exception as e:
+        print(f"❌ Error syncing project data: {e}")
     
     try:
         # Load all projects (now loaded from individual files)
@@ -901,73 +956,78 @@ def clean_citation_markers(text):
     cleaned = re.sub(r' {2,}', ' ', cleaned)
     return cleaned.strip()
 
-def query_assistant(user_query, channel_id=None, timeout=25):
-    """Query OpenAI Assistant with knowledge base
+def query_assistant(user_query, channel_id=None, user_email=None, timeout=25):
+    """Query OpenAI Assistant with Role-Based Access Control
     
     Args:
-        user_query: The user's question
-        channel_id: Optional channel ID for context
-        timeout: Maximum time to wait for response (seconds, default 25)
-    
-    Returns:
-        str: Assistant response or None if timeout/error
+        user_query: The question
+        channel_id: Context
+        user_email: The requester's email (CRITICAL FOR RBAC)
     """
-    if not ai_client:
-        return None
+    if not ai_client: return None
     
-    assistant_id, _ = setup_openai_assistant()
-    if not assistant_id:
-        return None
+    # Setup assistant and get stores
+    res = setup_openai_assistant()
+    if not res or res[0] is None: return None
+    assistant_id, vs_internal_id, vs_external_id = res
     
     try:
+        # --- RBAC LOGIC ---
+        # Default to External (Safe by default)
+        selected_vs_id = vs_external_id
+        access_level = "EXTERNAL"
+        
+        # Check permissions
+        is_internal = False
+        if user_email:
+            user_email = user_email.lower().strip()
+            # Check authorized users (Internal)
+            if user_email in [u.lower() for u in AUTHORIZED_USERS]:
+                is_internal = True
+        
+        if is_internal:
+            selected_vs_id = vs_internal_id
+            access_level = "INTERNAL"
+        
+        print(f"🔐 Access Control: {user_email} -> {access_level}")
+        
         # Create thread
         thread = ai_client.beta.threads.create()
         
-        # Add message
         ai_client.beta.threads.messages.create(
             thread_id=thread.id,
             role="user",
             content=user_query
         )
         
-        # Run assistant
+        # OVERRIDE Vector Store for this specific run
         run = ai_client.beta.threads.runs.create(
             thread_id=thread.id,
-            assistant_id=assistant_id
+            assistant_id=assistant_id,
+            tool_resources={
+                "file_search": {
+                    "vector_store_ids": [selected_vs_id]
+                }
+            }
         )
         
-        # Wait for completion with timeout
+        # Wait for completion
         import time
         start_time = time.time()
-        max_wait_time = timeout
         
         while run.status in ['queued', 'in_progress', 'cancelling']:
-            elapsed = time.time() - start_time
-            if elapsed > max_wait_time:
-                print(f"⏱️ Assistant query timeout after {max_wait_time} seconds")
-                return None  # Timeout - will fallback to regular chat completion
-            
+            if time.time() - start_time > timeout:
+                return None
             time.sleep(1)
             run = ai_client.beta.threads.runs.retrieve(thread_id=thread.id, run_id=run.id)
         
         if run.status == 'completed':
             messages = ai_client.beta.threads.messages.list(thread_id=thread.id)
-            response_text = messages.data[0].content[0].text.value
-            # Clean up citation markers
-            return clean_citation_markers(response_text)
-        elif run.status == 'failed':
-            error_msg = getattr(run, 'last_error', None)
-            if error_msg:
-                print(f"❌ Assistant run failed: {error_msg}")
-            return None
-        else:
-            print(f"⚠️ Assistant run status: {run.status}")
-            return None  # Return None to trigger fallback
+            resp = messages.data[0].content[0].text.value
+            return clean_citation_markers(resp)
             
     except Exception as e:
         print(f"❌ Error querying assistant: {e}")
-        import traceback
-        traceback.print_exc()
         return None
 
 # ==========================================
@@ -1155,7 +1215,7 @@ def command_download_pdf(ack, client, body):
 # ==========================================
 # FEATURE: AI ENGINE (CONTEXT AWARE)
 # ==========================================
-def process_ai_query(user_query, channel_id, reply_func):
+def process_ai_query(user_query, channel_id, reply_func, user_id=None, client=None):
     projects = load_db()
     context = get_request_context(channel_id)
     role = context['role']
@@ -1208,7 +1268,8 @@ def process_ai_query(user_query, channel_id, reply_func):
         
         # Try using Assistant first (if configured), fallback to chat completion
         # Use shorter timeout to avoid Slack command timeout
-        assistant_response = query_assistant(user_query, channel_id, timeout=20)
+        user_email = get_user_email(user_id, client) if user_id and client else None
+        assistant_response = query_assistant(user_query, channel_id, user_email=user_email, timeout=20)
         if assistant_response:
             reply_func(assistant_response)
             return
@@ -1266,7 +1327,7 @@ def handle_mentions(event, say, client):
         say("Please use the `/download-report` command for PDFs.")
     else:
         # Default to AI
-        process_ai_query(text, channel, say)
+        process_ai_query(text, channel, say, user_id, client)
 
 def process_email_for_status_update(text, channel_id=None, event_ts=None, user_id=None):
     """Enhanced email processing: updates status and logs brief history"""
@@ -1774,10 +1835,13 @@ def process_ask_background(respond, query_text, channel_id, user_id, client):
                 f"Look for entries marked as 'Source: MAILBOX_INBOX (Email)' and return the full email content."
             )
         
+        # Get user email for RBAC
+        user_email = get_user_email(user_id, client) if user_id else None
+        
         # 1. Try to get answer from the Knowledge Base (Assistant) FIRST
         # This checks the Vector Store (Slack messages, history, emails, etc.)
         # Increased timeout to 60s for file_search operations
-        assistant_response = query_assistant(enhanced_query, channel_id, timeout=60)
+        assistant_response = query_assistant(enhanced_query, channel_id, user_email=user_email, timeout=60)
         
         if assistant_response:
             # If the Assistant found something (e.g. Slack logs, emails), return it!
@@ -2787,9 +2851,9 @@ def initialize_app():
     
     # Setup OpenAI Assistant (if configured)
     if ai_client:
-        assistant_id, vector_store_id = setup_openai_assistant()
-        if assistant_id:
-            print(f"✅ OpenAI Assistant ready: {assistant_id}")
+        res = setup_openai_assistant()
+        if res and res[0]:
+            print(f"✅ OpenAI Assistant ready: {res[0]}")
             # Initial sync
             sync_data_to_knowledge_base()
         else:
