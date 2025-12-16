@@ -807,16 +807,7 @@ def sync_slack_messages_to_knowledge_base():
         traceback.print_exc()
         return f"❌ Critical Sync Error: {str(e)[:100]}"
 
-def sync_data_to_knowledge_base():
-    """Sync project data to knowledge base"""
-    if not ai_client:
-        return
-    
-    assistant_id, vector_store_id = setup_openai_assistant()
-    if not assistant_id or not vector_store_id:
-        return
-    
-    try:
+
 def sync_data_to_knowledge_base():
     """Sync project data to knowledge base - Uploads individual project files"""
     if not ai_client:
