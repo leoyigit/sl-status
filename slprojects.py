@@ -123,6 +123,52 @@ def _build_authorized_users():
 
 AUTHORIZED_USERS, EXTERNAL_AUTHORIZED_USERS = _build_authorized_users()
 
+
+# --- DATABASE FUNCTIONS (GIST) ---
+GIST_FILENAME_PROJECTS = "projects.json"       # PM Notes (Protected)
+GIST_FILENAME_KB = "knowledgebase.json"        # Chat Logs (Bot managed)
+
+def load_gist_file(filename):
+    """Generic helper to load any file from Gist"""
+    if not GITHUB_TOKEN or not GIST_ID: return None
+    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+    try:
+        response = requests.get(f"https://api.github.com/gists/{GIST_ID}", headers=headers, timeout=10)
+        if response.status_code == 200:
+            files = response.json()["files"]
+            if filename in files:
+                content = files[filename]["content"]
+                return json.loads(content)
+    except Exception as e:
+        print(f"❌ Error loading {filename}: {e}")
+    return None
+
+def save_gist_file(filename, data):
+    """Generic helper to save any file to Gist"""
+    if not GITHUB_TOKEN or not GIST_ID: return
+    headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+    payload = {"files": {filename: {"content": json.dumps(data, indent=2)}}}
+    try:
+        requests.patch(f"https://api.github.com/gists/{GIST_ID}", json=payload, headers=headers)
+    except Exception as e:
+        print(f"❌ Error saving {filename}: {e}")
+
+# 1. Projects DB (Structured Data)
+def load_db():
+    data = load_gist_file(GIST_FILENAME_PROJECTS)
+    return data if data is not None else []
+
+def save_db(data):
+    save_gist_file(GIST_FILENAME_PROJECTS, data)
+
+# 2. Knowledge Base (Chat Logs)
+def load_kb():
+    data = load_gist_file(GIST_FILENAME_KB)
+    return data if data is not None else {}
+
+def save_kb(data):
+    save_gist_file(GIST_FILENAME_KB, data)
+
 # --- HELPER: CONFIG MANAGEMENT ---
 def save_config(config):
     """Save config to file and update in-memory variables
@@ -660,361 +706,201 @@ def setup_openai_assistant():
         # Raise exception to caller so they know WHY it failed
         raise e
 
-def fetch_channel_messages(channel_id, limit=200, days_back=7):
-    """Fetch recent messages from a Slack channel (Robust Version)
+def fetch_channel_messages(channel_id, limit=200, oldest_ts=None):
+    """Fetch recent messages AND threaded replies from a Slack channel"""
+    import time
     
-    Args:
-        channel_id: Slack channel ID
-        limit: Max messages to fetch (default 200)
-        days_back: Only fetch messages from last N days (default 7)
-    """
+    # Default to 7 days ago if no timestamp provided
+    if not oldest_ts:
+        oldest_ts = time.time() - (7 * 24 * 60 * 60)
+    
     try:
-        # We use a try/except block specifically for the API call
+        # 1. Fetch Parent Messages
         try:
-            # Calculate oldest timestamp (default 7 days ago)
-            import time as time_mod
-            oldest_ts = time_mod.time() - (days_back * 24 * 60 * 60)
-            
             result = app.client.conversations_history(
                 channel=channel_id,
                 limit=limit,
-                oldest=str(oldest_ts)  # Only fetch messages newer than this
+                oldest=str(oldest_ts)
             )
         except Exception as e:
-            # Check if it's a "not_in_channel" error
-            error_str = str(e)
-            if "not_in_channel" in error_str:
-                print(f"⚠️ Bot is not in channel {channel_id}. Skipping.")
+            if "not_in_channel" in str(e) or "channel_not_found" in str(e):
                 return []
-            elif "channel_not_found" in error_str:
-                 print(f"⚠️ Channel {channel_id} not found. Skipping.")
-                 return []
-            else:
-                # If it's a real error, raise it so the outer block catches it
-                raise e
+            raise e
 
-        if not result.get("ok"):
-            print(f"⚠️ Slack API error for {channel_id}: {result.get('error')}")
-            return []
+        if not result.get("ok"): return []
         
-        all_messages = result.get("messages", [])
+        parent_messages = result.get("messages", [])
         messages = []
         
-        for msg in all_messages:
-            # Skip bot messages and system messages
-            if msg.get("subtype") in ["bot_message", "channel_join", "channel_leave", "channel_topic"]:
-                continue
-            
+        for msg in parent_messages:
+            # Skip join/leave messages
+            if msg.get("subtype") in ["channel_join", "channel_leave"]: continue
+
+            # 1. Process Parent
             text = msg.get("text", "")
-            if not text and "files" in msg:
-                text = f"[File shared]"
+            if not text and "files" in msg: text = "[File shared]"
             
-            # Strip @ mentions to prevent AI from triggering notifications
-            # Convert <@U123ABC> to just the name or remove
-            import re
+            # Clean User IDs
             text = re.sub(r'<@[A-Z0-9]+>', lambda m: get_user_name(m.group(0)[2:-1]), text)
-            # Also remove @channel and @here
-            text = text.replace("<!channel>", "channel").replace("<!here>", "here")
             
-            # Reduce threshold to capture short status updates
-            if text and len(text.strip()) > 2:
+            if text:
                 messages.append({
                     "text": text,
                     "user": msg.get("user", "unknown"),
                     "ts": msg.get("ts", ""),
-                    "channel": channel_id
+                    "channel": channel_id,
+                    "is_reply": False
                 })
-        
-        return messages
 
+            # 2. Process Threads (The Fix)
+            if msg.get("thread_ts") and msg.get("reply_count", 0) > 0:
+                try:
+                    time.sleep(0.2) # Rate limit safety
+                    thread_res = app.client.conversations_replies(
+                        channel=channel_id, 
+                        ts=msg["ts"], 
+                        limit=50, 
+                        oldest=str(oldest_ts)
+                    )
+                    for reply in thread_res.get("messages", []):
+                        if reply["ts"] == msg["ts"]: continue # Skip parent
+                        
+                        r_text = reply.get("text", "")
+                        r_text = re.sub(r'<@[A-Z0-9]+>', lambda m: get_user_name(m.group(0)[2:-1]), r_text)
+                        
+                        messages.append({
+                            "text": f"[Thread Reply] {r_text}",
+                            "user": reply.get("user", "unknown"),
+                            "ts": reply.get("ts", ""),
+                            "channel": channel_id,
+                            "is_reply": True
+                        })
+                except Exception as e:
+                    print(f"⚠️ Thread error: {e}")
+
+        return messages
     except Exception as e:
-        # Use simple print to avoid massive stack traces in logs for simple errors
-        print(f"❌ Error fetching messages from {channel_id}: {str(e)[:100]}")
+        print(f"❌ Fetch Error {channel_id}: {e}")
         return []
 
-def sync_slack_messages_to_knowledge_base():
-    """Fetch and sync messages with smart cleanup of old logs"""
-    if not ai_client:
-        return "❌ AI Client not configured"
+def sync_all_data_to_openai():
+    """
+    MASTER SYNC: 
+    1. Reads Projects (Gist)
+    2. Reads & Updates Chat Logs (Gist)
+    3. Uploads BOTH to OpenAI
+    """
+    if not ai_client: return "❌ AI Client not configured"
     
-    # Get IDs (and ensure they exist)
+    # --- STEP 1: Load Data ---
+    projects_data = load_db()
+    kb_data = load_kb()
+    
+    # Map Client Names to Channel IDs
+    client_channels = []
+    for cid, ctx in CHANNEL_MAP.items():
+        if ctx.get("type") in ["internal", "external"]:
+            client_channels.append({"id": cid, "client": ctx.get("client"), "type": "Slack"})
+    if MAILBOX_CHANNEL_ID:
+        client_channels.append({"id": MAILBOX_CHANNEL_ID, "client": "MAILBOX_INBOX", "type": "Email"})
+
+    # --- STEP 2: Fetch New Messages ---
+    updates_made = False
+    print(f"📥 Syncing {len(client_channels)} channels...")
+    
+    for ch in client_channels:
+        client = ch["client"]
+        cid = ch["id"]
+        
+        if client not in kb_data:
+            kb_data[client] = {"last_synced_ts": "0", "messages": []}
+            
+        last_ts = kb_data[client].get("last_synced_ts", "0")
+        
+        # Fetch new messages
+        new_msgs = fetch_channel_messages(cid, limit=100, oldest_ts=float(last_ts))
+        
+        if new_msgs:
+            updates_made = True
+            max_ts = float(last_ts)
+            
+            for m in new_msgs:
+                ts = float(m["ts"])
+                if ts > max_ts: max_ts = ts
+                
+                kb_data[client]["messages"].append({
+                    "ts": str(ts),
+                    "date": datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M'),
+                    "user": get_user_name(m["user"]),
+                    "content": m["text"],
+                    "type": ch["type"]
+                })
+            
+            # Update timestamp
+            kb_data[client]["last_synced_ts"] = str(max_ts)
+            print(f"   ✅ {client}: +{len(new_msgs)} items")
+
+    # --- STEP 3: Save to Gist (if changed) ---
+    if updates_made:
+        save_kb(kb_data)
+        print("💾 Updated knowledgebase.json in Gist")
+
+    # --- STEP 4: Upload to OpenAI ---
     try:
         assistant_id, vector_store_id = setup_openai_assistant()
-    except Exception as e:
-        return f"❌ Assistant Setup Failed: {str(e)}"
         
-    if not assistant_id or not vector_store_id:
-        return "❌ Assistant/Vector Store setup failed (Unknown Error)"
-    
-    try:
-        all_messages = []
-        stats = {"mailbox": 0, "channels": 0}
+        # A. Prepare Project Data (JSON)
+        projects_text = json.dumps(projects_data, indent=2)
+        
+        # B. Prepare Logs Data (Text)
+        logs_text = "SLACK AND EMAIL HISTORY LOGS\n============================\n"
+        for client, data in kb_data.items():
+            # Sort messages by date (newest last for reading flow, or newest first?)
+            # Usually newest last is better for reading context
+            msgs = sorted(data.get("messages", []), key=lambda x: float(x["ts"]))
+            
+            # Keep last 100 messages per client to avoid token overload
+            msgs = msgs[-100:] 
+            
+            for m in msgs:
+                logs_text += f"[{m['date']}] {m['user']} ({client}): {m['content']}\n"
+            logs_text += "\n" + ("-"*30) + "\n"
 
-        # --- 1. Fetch Messages ---
-        channels_to_sync = []
-        
-        # Add project channels
-        for cid, ctx in CHANNEL_MAP.items():
-            if ctx.get("type") in ["internal", "external"]:
-                channels_to_sync.append({
-                    "id": cid, "client": ctx.get("client", "Unknown"), "type": ctx.get("type", "internal")
-                })
-        
-        # Add Mailbox Channel
-        if MAILBOX_CHANNEL_ID:
-            channels_to_sync.append({
-                "id": MAILBOX_CHANNEL_ID, "client": "MAILBOX_INBOX", "type": "email_source"
-            })
+        # C. Clear Old Vector Store Files
+        # (We must replace them to ensure fresh data)
+        current_files = ai_client.vector_stores.files.list(vector_store_id=vector_store_id)
+        for f in current_files:
+            ai_client.vector_stores.files.delete(vector_store_id=vector_store_id, file_id=f.id)
 
-        print(f"📥 Starting sync for {len(channels_to_sync)} channels...")
-        
-        # Track per-channel stats
-        channel_stats = {}
-
-        latest_timestamp = 0  # Track the most recent message
-        
-        for ch in channels_to_sync:
-            channel_id = ch["id"]
-            client_name = ch["client"]
-            
-            # Fetch messages (Now safe from crashing)
-            # Fetch last 30 days as requested by user
-            messages = fetch_channel_messages(channel_id, limit=300, days_back=30)
-            
-            # Track per-channel stats
-            if client_name not in channel_stats:
-                channel_stats[client_name] = 0
-            
-            if messages:
-                channel_stats[client_name] += len(messages)
-                
-                # Update stats
-                if client_name == "MAILBOX_INBOX":
-                    stats["mailbox"] += len(messages)
-                else:
-                    stats["channels"] += len(messages)
-                
-                for msg in messages:
-                    # Track latest message timestamp
-                    try:
-                        msg_ts = float(msg["ts"])
-                        if msg_ts > latest_timestamp:
-                            latest_timestamp = msg_ts
-                    except:
-                        pass
-                    
-                    # Convert user ID to name
-                    user_name = get_user_name(msg["user"]) if msg["user"] != "unknown" else "Unknown"
-                    
-                    all_messages.append({
-                        "client": client_name,
-                        "type": "Email" if client_name == "MAILBOX_INBOX" else "Slack Chat",
-                        "content": msg["text"],
-                        "timestamp": msg["ts"],
-                        "user": user_name
-                    })
-        
-        # Log channel stats
-        print(f"📊 Per-channel message counts:")
-        for client, count in sorted(channel_stats.items()):
-            print(f"   - {client}: {count} messages")
-        
-        if not all_messages:
-            return "⚠️ No messages found in any channel (Bot might not be invited to channels)."
-        
-        # --- 2. Sort by NEWEST first so AI sees recent content ---
-        all_messages.sort(key=lambda x: float(x.get('timestamp', 0)), reverse=True)
-        
-        # --- 3. Format File ---
-        messages_text = "SLACK LOGS AND EMAIL INBOX DUMP\n"
-        messages_text += "=" * 50 + "\n"
-        messages_text += f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
-        messages_text += "IMPORTANT: Messages are sorted NEWEST FIRST. The most recent messages are at the TOP.\n"
-        messages_text += "When asked about 'latest' or 'recent', prioritize messages near the TOP of this file.\n"
-        messages_text += "=" * 50 + "\n\n"
-        
-        import time as time_module
-        current_time = time_module.time()
-        
-        for msg in all_messages:
-            try:
-                msg_timestamp = float(msg['timestamp'])
-                date_str = datetime.fromtimestamp(msg_timestamp).strftime('%Y-%m-%d %H:%M')
-                
-                # Add relative time
-                seconds_ago = current_time - msg_timestamp
-                if seconds_ago < 3600:
-                    relative = f"({int(seconds_ago / 60)} min ago)"
-                elif seconds_ago < 86400:
-                    relative = f"({int(seconds_ago / 3600)} hours ago)"
-                else:
-                    relative = f"({int(seconds_ago / 86400)} days ago)"
-                
-                date_str = f"{date_str} {relative}"
-            except:
-                date_str = "Unknown"
-            
-            # Enhanced formatting for better searchability
-            client_name = msg['client']
-            msg_type = msg['type']
-            content = msg['content']
-            
-            # For emails, add client name extraction for better search
-            if msg_type == "Email":
-                messages_text += f"📅 Date: {date_str}\n"
-                messages_text += f"📂 Source: {client_name} ({msg_type})\n"
-                messages_text += f"📧 EMAIL MESSAGE - Searchable by client name in content\n"
-                messages_text += f"👤 User: {msg['user']}\n"
-                messages_text += f"📝 EMAIL CONTENT:\n{content}\n"
-                messages_text += f"🔍 Keywords: {client_name}, email, mailbox, communication\n"
-            else:
-                messages_text += f"📅 Date: {date_str}\n"
-                messages_text += f"📂 Source: {client_name} ({msg_type})\n"
-                messages_text += f"👤 User: {msg['user']}\n"
-                messages_text += f"📝 Content:\n{content}\n"
-            
-            messages_text += "-" * 50 + "\n\n"
-        
-        # --- 3. CLEANUP OLD FILES (Prevents duplication) ---
-        print("🧹 Cleaning up old log files from Vector Store...")
-        try:
-            # List files in vector store
-            # Strategy: Delete ALL existing files in this vector store before uploading the new one.
-            # This ensures we consistently have a "fresh start" state and no conflicting history.
-            
-            # 1. List files
-            print("  - Listing existing files...")
-            files_in_vs = ai_client.vector_stores.files.list(vector_store_id=vector_store_id)
-            
-            deleted_count = 0
-            for vs_file in files_in_vs:
-                try:
-                    # Remove from Vector Store
-                    ai_client.vector_stores.files.delete(
-                        vector_store_id=vector_store_id,
-                        file_id=vs_file.id
-                    )
-                    # Also try to delete the underlying file object to save storage space
-                    try:
-                        ai_client.files.delete(file_id=vs_file.id)
-                    except:
-                        pass # It's fine if we fail to delete the global file, as long as it's out of the VS
-                        
-                    deleted_count += 1
-                except Exception as e:
-                    print(f"⚠️ Failed to delete file {vs_file.id}: {e}")
-            
-            if deleted_count > 0:
-                print(f"✅ Removed {deleted_count} old files from knowledge base.")
-            else:
-                print("  - No old files to clean up.")
-        except Exception as e:
-            print(f"⚠️ Cleanup warning: {e}")
-            
-        # --- 4. Upload to OpenAI ---
+        # D. Upload New Files
         import tempfile
-        # Create a unique filename with timestamp
-        filename = f"slack_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
         
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', prefix='slack_logs_', delete=False, encoding='utf-8') as f:
-            f.write(messages_text)
-            temp_path = f.name
+        # File 1: Projects
+        with tempfile.NamedTemporaryFile(mode='w+', suffix='.json', delete=False) as f1:
+            f1.write(projects_text)
+            f1_path = f1.name
         
-        # Rename to better filename (OpenAI uses filename)
-        final_path = os.path.join(tempfile.gettempdir(), filename)
-        os.rename(temp_path, final_path)
-        
-        with open(final_path, 'rb') as f:
-            file = ai_client.files.create(file=f, purpose="assistants")
-        
-        # Add to vector store
-        ai_client.vector_stores.files.create(
-            vector_store_id=vector_store_id,
-            file_id=file.id
-        )
-        print(f"✅ Uploaded new logs: {filename} (File ID: {file.id})")
-
-        # Cleanup local file
-        os.unlink(final_path)
-        
-        # Calculate time-ago for latest message
-        latest_msg_ago = "Unknown"
-        if latest_timestamp > 0:
-            try:
-                import time
-                seconds_ago = time.time() - latest_timestamp
-                if seconds_ago < 60:
-                    latest_msg_ago = f"{int(seconds_ago)} sec ago"
-                elif seconds_ago < 3600:
-                    latest_msg_ago = f"{int(seconds_ago / 60)} min ago"
-                elif seconds_ago < 86400:
-                    latest_msg_ago = f"{int(seconds_ago / 3600)} hours ago"
-                else:
-                    latest_msg_ago = f"{int(seconds_ago / 86400)} days ago"
-            except:
-                latest_msg_ago = datetime.fromtimestamp(latest_timestamp).strftime('%Y-%m-%d %H:%M')
-        
-        # Build channel breakdown (top 5 by count)
-        sorted_channels = sorted(channel_stats.items(), key=lambda x: x[1], reverse=True)[:5]
-        channel_breakdown = "\n".join([f"   • {c}: {n}" for c, n in sorted_channels if n > 0])
-        
-        return (
-            f"✅ *Sync Complete!*\n"
-            f"📧 Emails (Mailbox): {stats['mailbox']}\n"
-            f"💬 Slack Messages: {stats['channels']}\n"
-            f"📚 Total Items: {len(all_messages)}\n"
-            f"🕐 Latest Message: {latest_msg_ago}\n"
-            f"📊 *Top Channels:*\n{channel_breakdown}\n"
-            f"🆔 Vector Store: `{vector_store_id}`"
-        )
-        
-    except Exception as e:
-        print(f"❌ Critical Sync Error: {e}")
-        import traceback
-        traceback.print_exc()
-        return f"❌ Critical Sync Error: {str(e)[:100]}"
-
-def sync_data_to_knowledge_base(projects=None):
-    """Sync project data to knowledge base"""
-    if not ai_client:
-        return
-    
-    assistant_id, vector_store_id = setup_openai_assistant()
-    if not assistant_id or not vector_store_id:
-        return
-    
-    try:
-        # Sync project data
-        if projects is None:
-            projects = load_db()
-        projects_json = json.dumps(projects, indent=2)
-        
-        # Create a temporary file
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-            f.write(projects_json)
-            temp_path = f.name
-        
-        # Upload to OpenAI
-        with open(temp_path, 'rb') as f:
-            file = ai_client.files.create(file=f, purpose="assistants")
-        
-        # Add to vector store
-        try:
-            ai_client.vector_stores.files.create(
+        # File 2: Logs
+        with tempfile.NamedTemporaryFile(mode='w+', suffix='.txt', delete=False) as f2:
+            f2.write(logs_text)
+            f2_path = f2.name
+            
+        # Upload
+        with open(f1_path, 'rb') as f1, open(f2_path, 'rb') as f2:
+            file_batch = ai_client.beta.vector_stores.file_batches.upload_and_poll(
                 vector_store_id=vector_store_id,
-                file_id=file.id
+                files=[f1, f2]
             )
-        except Exception as e:
-            print(f"❌ Error adding file to vector store: {e}")
-            raise
+            
+        # Cleanup
+        os.unlink(f1_path)
+        os.unlink(f2_path)
         
-        # Clean up
-        os.unlink(temp_path)
-        print(f"✅ Synced project data to knowledge base")
-        
+        return f"✅ Sync Complete! Updated AI with {len(projects_data)} projects and latest chat logs."
+
     except Exception as e:
-        print(f"❌ Error syncing to knowledge base: {e}")
+        return f"❌ Sync Error: {e}"
+
 
 def clean_citation_markers(text):
     """Remove OpenAI Assistant citation markers from text
@@ -2538,7 +2424,7 @@ def command_sync_knowledge(ack, client, body):
         # 2. Sync Slack/Email Logs (Unstructured Data)
         if sync_messages:
             client.chat_postMessage(channel=channel_id, text="📥 Fetching emails and chats (this takes 10s)...")
-            result_msg = sync_slack_messages_to_knowledge_base()
+            result_msg = sync_all_data_to_openai()
             msg += result_msg
         else:
             msg += "ℹ️ _Skipped message logs. Use `/sync-knowledge messages` to include emails/chats._"
